@@ -26,6 +26,8 @@ namespace VideoTest.UnityIntegration
         [SerializeField] private KeyCode recenterKey = KeyCode.R;
         [SerializeField] private bool showLocalPreview = true;
         [SerializeField] private float previewCameraDepthOffset = 1.0f;
+        [SerializeField] private bool showDebugOverlay = true;
+        [SerializeField] private KeyCode toggleDebugOverlayKey = KeyCode.F1;
         [SerializeField] private bool allowCommandLineOverrides = true;
         [SerializeField] private bool useSavedEndpoint = true;
         [SerializeField] private bool rememberSuccessfulEndpoint = true;
@@ -43,16 +45,24 @@ namespace VideoTest.UnityIntegration
         private Vector3 originPosition;
         private Quaternion originRotation;
         private bool savedEndpointThisSession;
-        private float nextStatsPollTime;
+        private float nextPersistencePollTime;
+        private float nextDiagnosticsPollTime;
         private float nextAutoStartRetryTime;
         private bool autoStartRetryPending;
         private string configSourceSummary = "scene_defaults";
+        private bool debugOverlayVisible = true;
+        private bool hasCachedStats;
+        private UnitySenderPluginBindings.UnitySenderStats cachedStats;
+        private string cachedPoseSenderHost = string.Empty;
+        private string cachedActiveTargetHost = string.Empty;
+        private string lastLifecycleMessage = "Idle";
 
         private const string PreviewCameraName = "UnitySenderPreviewCamera";
 
         private void Awake()
         {
             captureCamera = GetComponent<Camera>();
+            debugOverlayVisible = showDebugOverlay;
             ResolveRuntimeConfiguration();
             EnsureLocalPreviewCamera();
         }
@@ -72,7 +82,13 @@ namespace VideoTest.UnityIntegration
             if (!streaming)
             {
                 TryAutoStartRetry();
+                UpdateRuntimeDiagnostics();
                 return;
+            }
+
+            if (Input.GetKeyDown(toggleDebugOverlayKey))
+            {
+                debugOverlayVisible = !debugOverlayVisible;
             }
 
             if (applyPoseToCamera && UnitySenderPluginBindings.UnitySender_GetLatestPose(out var pose) && pose.hasPose != 0)
@@ -81,6 +97,7 @@ namespace VideoTest.UnityIntegration
             }
 
             SyncLocalPreviewCamera();
+            UpdateRuntimeDiagnostics();
             PollForSuccessfulEndpoint();
 
             if (Input.GetKeyDown(recenterKey))
@@ -166,7 +183,8 @@ namespace VideoTest.UnityIntegration
             Application.runInBackground = true;
             originInitialized = false;
             savedEndpointThisSession = false;
-            nextStatsPollTime = Time.unscaledTime;
+            nextPersistencePollTime = Time.unscaledTime;
+            nextDiagnosticsPollTime = Time.unscaledTime;
             autoStartRetryPending = false;
             streaming = true;
 
@@ -175,6 +193,8 @@ namespace VideoTest.UnityIntegration
             {
                 activeTargetHost = detectedHost;
             }
+            cachedActiveTargetHost = activeTargetHost;
+            lastLifecycleMessage = $"Streaming to {activeTargetHost}:{videoPort}";
             Debug.Log(
                 $"UnitySenderController started. source={configSourceSummary} " +
                 $"target={activeTargetHost}:{videoPort} posePort={posePort} size={encodeWidth}x{encodeHeight} fps={fps} bitrate={bitrate}");
@@ -204,6 +224,7 @@ namespace VideoTest.UnityIntegration
             renderEventFunc = IntPtr.Zero;
             renderEventId = -1;
             autoStartRetryPending = false;
+            lastLifecycleMessage = "Stopped";
         }
 
         [ContextMenu("Recenter From Current Pose")]
@@ -302,12 +323,14 @@ namespace VideoTest.UnityIntegration
             {
                 autoStartRetryPending = true;
                 nextAutoStartRetryTime = Time.unscaledTime + Mathf.Max(autoStartRetryIntervalSeconds, 0.1f);
+                lastLifecycleMessage = "Waiting for pose source to auto-learn target host";
                 Debug.LogWarning(
                     $"UnitySenderController deferred startup because targetHost={targetHost} and no pose source was ready yet. " +
                     $"Retrying in {autoStartRetryIntervalSeconds:0.0}s.");
                 return;
             }
 
+            lastLifecycleMessage = "Native sender start failed";
             Debug.LogError("UnitySenderController failed to start the native sender plugin.");
         }
 
@@ -361,6 +384,8 @@ namespace VideoTest.UnityIntegration
             autoStartRetryIntervalSeconds = Mathf.Max(autoStartRetryIntervalSeconds, 0.1f);
 
             configSourceSummary = string.Join("+", sourceParts);
+            cachedActiveTargetHost = targetHost;
+            lastLifecycleMessage = "Configured";
             Debug.Log(
                 $"UnitySenderController config resolved. source={configSourceSummary} " +
                 $"target={targetHost}:{videoPort} posePort={posePort} size={encodeWidth}x{encodeHeight} fps={fps} bitrate={bitrate} " +
@@ -405,12 +430,12 @@ namespace VideoTest.UnityIntegration
 
         private void PollForSuccessfulEndpoint()
         {
-            if (!streaming || !rememberSuccessfulEndpoint || savedEndpointThisSession || Time.unscaledTime < nextStatsPollTime)
+            if (!streaming || !rememberSuccessfulEndpoint || savedEndpointThisSession || Time.unscaledTime < nextPersistencePollTime)
             {
                 return;
             }
 
-            nextStatsPollTime = Time.unscaledTime + statsPollIntervalSeconds;
+            nextPersistencePollTime = Time.unscaledTime + statsPollIntervalSeconds;
             if (!UnitySenderPluginBindings.UnitySender_GetStats(out var stats))
             {
                 return;
@@ -426,6 +451,7 @@ namespace VideoTest.UnityIntegration
                 return;
             }
 
+            cachedPoseSenderHost = detectedHost;
             if (!UnitySenderRuntimeEndpointStore.SaveSavedEndpoint(detectedHost, ClampPort(videoPort), ClampPort(posePort)))
             {
                 return;
@@ -436,6 +462,76 @@ namespace VideoTest.UnityIntegration
                 $"UnitySenderController saved last known good endpoint from pose source. " +
                 $"configuredTarget={targetHost}:{videoPort} learnedTarget={detectedHost}:{videoPort} posePort={posePort} " +
                 $"path={UnitySenderRuntimeEndpointStore.GetConfigPath()}");
+        }
+
+        private void UpdateRuntimeDiagnostics()
+        {
+            if (Time.unscaledTime < nextDiagnosticsPollTime && hasCachedStats)
+            {
+                return;
+            }
+
+            nextDiagnosticsPollTime = Time.unscaledTime + statsPollIntervalSeconds;
+            if (UnitySenderPluginBindings.UnitySender_GetStats(out cachedStats))
+            {
+                hasCachedStats = true;
+            }
+
+            if (UnitySenderPluginBindings.TryGetLastPoseSenderIpv4(out var detectedHost))
+            {
+                cachedPoseSenderHost = detectedHost;
+                if (IsAutoTargetHost())
+                {
+                    cachedActiveTargetHost = detectedHost;
+                }
+            }
+            else if (string.IsNullOrEmpty(cachedActiveTargetHost))
+            {
+                cachedActiveTargetHost = targetHost;
+            }
+        }
+
+        private void OnGUI()
+        {
+            if (!Application.isPlaying || !showDebugOverlay || !debugOverlayVisible)
+            {
+                return;
+            }
+
+            const float width = 420.0f;
+            const float padding = 12.0f;
+            GUILayout.BeginArea(new Rect(padding, padding, width, 260.0f), GUI.skin.box);
+            GUILayout.Label("Unity Sender Debug");
+            GUILayout.Label($"Lifecycle: {lastLifecycleMessage}");
+            GUILayout.Label($"Source: {configSourceSummary}");
+            GUILayout.Label($"Configured target: {targetHost}:{videoPort}");
+            GUILayout.Label($"Active target: {cachedActiveTargetHost}:{videoPort}");
+            GUILayout.Label($"Pose port: {posePort}");
+            GUILayout.Label($"Streaming: {streaming}  AutoRetry: {autoStartRetryPending}");
+            GUILayout.Label($"Render event: {(renderEventFunc != IntPtr.Zero ? "ready" : "null")} / id={renderEventId}");
+            GUILayout.Label($"Capture texture: {(captureTexture != null ? $"{captureTexture.width}x{captureTexture.height}" : "null")}");
+            GUILayout.Label($"Last pose sender: {(string.IsNullOrEmpty(cachedPoseSenderHost) ? "<none>" : cachedPoseSenderHost)}");
+
+            if (hasCachedStats)
+            {
+                GUILayout.Space(6.0f);
+                GUILayout.Label($"Device ready: {cachedStats.unityDeviceReady != 0}");
+                GUILayout.Label($"Source texture ready: {cachedStats.sourceTextureReady != 0}");
+                GUILayout.Label($"Copied frame ready: {cachedStats.copiedFrameReady != 0}");
+                GUILayout.Label($"Sender thread: {cachedStats.senderThreadRunning != 0}  Network thread: {cachedStats.networkThreadRunning != 0}");
+                GUILayout.Label($"Source size: {cachedStats.sourceWidth}x{cachedStats.sourceHeight}");
+                GUILayout.Label($"Render copies: {cachedStats.renderThreadCopyCount}");
+                GUILayout.Label($"Pose packets: {cachedStats.posePacketsReceived}  Last pose seq: {cachedStats.lastPoseSequence}");
+                GUILayout.Label($"Control packets: {cachedStats.controlPacketsReceived}");
+            }
+            else
+            {
+                GUILayout.Space(6.0f);
+                GUILayout.Label("Stats: <unavailable>");
+            }
+
+            GUILayout.Label($"Toggle overlay: {toggleDebugOverlayKey}");
+            GUILayout.EndArea();
         }
 
         private void ApplyPoseToCamera(UnitySenderPluginBindings.UnitySenderPose pose)
