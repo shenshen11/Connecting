@@ -1,0 +1,45 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.videotest.nativeapp'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.videotest.nativeapp"
+        minSdk 29
+        targetSdk 34
+        versionCode 1
+        versionName "0.2.0"
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_static"
+                targets "xr_pose_sender"
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('../CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    ndkVersion "30.0.14904198"
+}
+
+dependencies {
+}

@@ -1,0 +1,38 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vs/
+.vscode/
+.idea/
+
+# Windows native build outputs
+/windows-native/build/
+*.vcxproj.user
+*.VC.db
+
+# Android / Gradle build outputs
+/android-native/.gradle/
+/android-native/.idea/
+/android-native/local.properties
+/android-native/app/.cxx/
+/android-native/app/build/
+/android-native/build/
+/android-native/*logcat*.txt
+/android-native/wlan0.txt
+
+# Temporary local test logs
+/tmp_*.log
+/tmp_*.err
+
+# Third-party local sample build artifacts
+/third_party/nvidia-video-sdk-samples/video-sdk-samples-master/nvEncBroadcastSample/nvEncBroadcastSample/x64/Debug/
+/third_party/*.zip
+
+# Future Unity project generated folders
+/pc-unity-app/[Ll]ibrary/
+/pc-unity-app/[Tt]emp/
+/pc-unity-app/[Ll]ogs/
+/pc-unity-app/[Oo]bj/
+/pc-unity-app/[Bb]uild/
+/pc-unity-app/[Bb]uilds/
+/pc-unity-app/[Uu]ser[Ss]ettings/

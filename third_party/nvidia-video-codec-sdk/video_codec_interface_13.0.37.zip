@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang='en' class='h-100' data-color-scheme='light'>
+  <head>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="csrf-param" content="authenticity_token" />
+<meta name="csrf-token" content="D0YcteC4C3qy9zJsRJMPqK8dmMelPJlC3fNukmmM-h4CNiEMu4OjbcWA4-e6dPSt6AlaKbmysb9By34O7BVeOQ" />
+    <meta name="csp-nonce" />
+    <title>Log in | NVIDIA Developer</title>
+<meta property="og:site_name" content="NVIDIA Developer">
+<meta property="og:title" content="Log in">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://developer.download.nvidia.com/images/og-default.jpg">
+<meta property="og:url" content="https://developer.nvidia.com/login">
+<meta name="twitter:title" content="Log in">
+<meta name="twitter:image" content="https://developer.download.nvidia.com/images/og-default.jpg">
+<meta name="twitter:site" content="@NVIDIA">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:creator" content="@NVIDIA">
+
+    <link rel="stylesheet" href="https://developer.nvidia.com/assets/application-5cd7d17b41ab771c0c506f460d22318fc1de8f94704013e9c85824b4ac1f432d.css" media="all" />
+
+    <script>
+  const NvAssets = {
+    CSS: {
+      highlightJs: "https://developer.nvidia.com/assets/highlight-7c6157fe69da4cc401cddeb387737d6991b2012dc14e90f3d52764a3a58fd3da.css",
+    }
+  }
+</script>
+
+
+    
+  <link rel="stylesheet" href="https://developer.nvidia.com/assets/one-trust-bea625cf16a072ce5fdb0707a19f2645daf63c05eb1a016db72773eba008fc07.css" />
+  <script src="https://cdn.cookielaw.org/scripttemplates/otSDKStub.js" charset="UTF-8" data-document-language="true" data-domain-script="3e2b62ff-7ae7-4ac5-87c8-d5949ecafff5"></script>
+
+<script src="https://images.nvidia.com/aem-dam/Solutions/ot-js/ot-custom.js"></script>
+
+<script>
+  function OptanonWrapper() {
+    let event = new Event('bannerLoaded');
+    window.dispatchEvent(event);
+
+  }
+</script>
+
+
+    <script>
+  (function() {
+    var didInit = false;
+    function initMunchkin() {
+      if(didInit === false) {
+        didInit = true;
+        Munchkin.init('156-OFN-742');
+      }
+    }
+    var s = document.createElement('script');
+    s.type = 'text/javascript';
+    s.async = true;
+    s.src = '//munchkin.marketo.net/munchkin.js';
+    s.onreadystatechange = function() {
+      if (this.readyState == 'complete' || this.readyState == 'loaded') {
+        initMunchkin();
+      }
+    };
+    s.onload = initMunchkin;
+    document.getElementsByTagName('head')[0].appendChild(s);
+})();
+</script>
+
+    <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    "name": "NVIDIA Developer",
+    "url": "https://developer.nvidia.com",
+    "logo": "https://www.nvidia.com/en-us/about-nvidia/legal-info/logo-brand-usage/_jcr_content/root/responsivegrid/nv_container_392921705/nv_container_412055486/nv_image.coreimg.100.630.png/1703060329095/nvidia-logo-horz.png",
+    "sameAs": [
+      "https://github.com/nvidia",
+      "https://www.linkedin.com/company/nvidia/",
+      "https://x.com/nvidiadeveloper"
+    ]
+  }
+</script>
+
+    
+    <script src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js" data-ot-ignore="true"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.3/jquery.min.js" integrity="sha512-STof4xm1wgkfm7heWqFJVn58Hm3EtS31XFaagaa8VMReCXAkQnJZ+jEy8PCC/iT18dFy95WcExNHFTqLyp72eQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+    <script src="https://developer.nvidia.com/assets/bootstrap/5.1.3/bootstrap.bundle.min-51ad1d8cab4ebd9873a0429f5e67ca717a71fd96daf8025bc04a88848e5b375c.js"></script>
+
+
+    <link rel="icon" type="image/x-icon" href="https://developer.nvidia.com/assets/favicon-81bff16cada05fcff11e5711f7e6212bdc2e0a32ee57cd640a8cf66c87a6cbe6.ico" />
+  </head>
+
+  <body class='d-flex flex-column h-100'>
+    
+    
+
+
+
+
+
+    
+<div class='d-flex align-items-center min-vh-100 p-3 justify-content-center login-page__background'>
+  <div class='bg-white rounded shadow-lg flex-grow-1 overflow-hidden login-page__container'>
+    <div class='login-page__header bg-black text-white'>
+      <a href="/"><img class="login-page__logo" alt="NVIDIA" src="https://developer.nvidia.com/assets/logo-white-cd8e2d122102f15a8774e941e9998a98f0f8baa119313b9b3ee6fbad50392f96.svg" /></a>
+    </div>
+    <div class='d-flex flex-column flex-md-row'>
+      <div class='login-page__side login-page__side--benefits'>
+        <h2 class='login-page__title'>Welcome</h2>
+        <ul class='login-page__benefits-list nv-rdp-benefits list-unstyled mb-0'>
+          <li class='d-flex align-items-center login-page__benefit-item--bottom'>
+            <div class='login-page__benefit-icon'>
+              <img class="login-page__icon-image" alt="Forum" src="https://developer.nvidia.com/assets/icon-forum-9a7c35d12ab88d9fc752015b910637f0b9471dd90ae08d435f92e06dc76178cc.png" />
+            </div>
+            <span>Connect with <b>millions of like-minded developers, researchers, and innovators</b>.</span>
+          </li>
+          <li class='d-flex align-items-center login-page__benefit-item--both'>
+            <div class='login-page__benefit-icon'>
+              <img class="login-page__icon-image" alt="Software" src="https://developer.nvidia.com/assets/icon-software-5b5a2e0b18881df0b4f24aaaab2e4c067b72df585991e0a397b42e30a4815951.png" />
+            </div>
+            <span>Accelerate your apps with <b>the latest tools</b> and <b>150+ SDKs</b>.</span>
+          </li>
+          <li class='d-flex align-items-center login-page__benefit-item--top'>
+            <div class='login-page__benefit-icon'>
+              <img class="login-page__icon-image" alt="Bug" src="https://developer.nvidia.com/assets/icon-bug-e621110be37e5d8ae8b7af451074ebdfd0b436540823f66f9d2ed608d045b03b.png" />
+            </div>
+            <span>Receive <b>technical training</b> and <b>expert help</b>.</span>
+          </li>
+        </ul>
+      </div>
+      <div class='login-page__side'>
+        <h1 class='login-page__heading'>Log in or sign up for an NVIDIA account</h1>
+
+          <div class='login-page__alert login-page__alert--error alert' role='alert'>
+            You need to sign in or sign up before continuing.
+          </div>
+
+
+        <form class="login-page__form" action="/users/auth/openid_connect" accept-charset="UTF-8" method="post"><input type="hidden" name="authenticity_token" value="DheVZ9VgNKcCA3PTtUqjc--Pl2jCt_0IJbN7TXrLJSrP-WB5PM4ipous2XSbHbrGywZ_IpWJWeTfdlOmqhYCgw" autocomplete="off" />
+          <div class='d-flex flex-column'>
+            <label class="login-page__label" for="email">Email</label>
+            <input required="required" autofocus="autofocus" class="login-page__input" type="email" name="login_hint" id="login_hint" />
+          </div>
+
+
+          <button type='submit' value='Next' class='nv-cta-primary login-page__button'>Next</button>
+</form>      </div>
+    </div>
+  </div>
+</div>
+
+
+
+    
+    
+    
+    
+    
+      <script>
+  let silentAuthHost = 'www.nvidia.com';
+  let crossOriginPageUrl = `https://${silentAuthHost}/auth/hints/`;
+
+  function readHint() {
+    return new Promise((resolve) => {
+      const { origin: targetOrigin } = new URL(crossOriginPageUrl);
+
+      const iframe = document.createElement('iframe');
+      iframe.hidden = true;
+      iframe.src = crossOriginPageUrl;
+
+      function responseHandler(event) {
+        if (event.origin === targetOrigin) {
+          iframe.parentNode.removeChild(iframe);
+          return resolve(event.data);
+        }
+      }
+
+      window.addEventListener('message', responseHandler, { once: true });
+
+      iframe.onload = () => {
+        iframe.contentWindow.postMessage({ type: 'read' }, targetOrigin);
+      }
+
+      document.body.appendChild(iframe);
+    });
+  }
+
+  function writeHint(login_hint, idp_id, timestamp, sub) {
+    const { origin: targetOrigin } = new URL(crossOriginPageUrl);
+
+    const iframe = document.createElement('iframe');
+    iframe.hidden = true;
+    iframe.src = crossOriginPageUrl;
+
+    iframe.onload = () => {
+      const message = { type: 'write', login_hint, idp_id, timestamp, sub };
+      iframe.contentWindow.postMessage(message, targetOrigin);
+    }
+
+    document.body.appendChild(iframe);
+  }
+
+  function deleteHint() {
+    const { origin: targetOrigin } = new URL(crossOriginPageUrl);
+
+    const iframe = document.createElement('iframe');
+    iframe.hidden = true;
+    iframe.src = crossOriginPageUrl;
+
+    iframe.onload = () => {
+      iframe.contentWindow.postMessage({ type: 'delete' }, targetOrigin);
+    }
+
+    document.body.appendChild(iframe);
+  }
+
+
+</script>
+
+    <script>_satellite.pageBottom();</script>
+    <script src="https://api-prod.nvidia.com/search/nvidia-search-library.js"></script>
+
+    <script src="https://developer.nvidia.com/assets/nv-gallery-widget-d1571cad15d961fd3ba013f57119be04a2adf32aa31b16be44a0f10f4671c37b.js"></script>
+    <script src="https://developer.nvidia.com/packs/js/runtime-69f8104525d1541ca92d.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/4692-a478c93816dbe985b4fa.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/9878-ace6038de3dd10e07189.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/4386-b410797d0fa3c9b7f8c0.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/8465-34d1ba762d9cdeef15fb.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/7053-3dff10f6aba29057048b.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/486-d9c40966f5e189a7df37.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/8311-bc04e55c282e625862a2.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/1252-e6af78d36c708e01c2a6.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/8823-1bca151f7e292c3ba6e8.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/2104-96b997947b67008b6414.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/6900-569f8417c00c10ce2c0e.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/application-ba969167f7e52e0f7d14.js" defer="defer"></script>
+<script src="https://developer.nvidia.com/packs/js/ls_track-b3d3055e95f0b20901db.js" defer="defer"></script>
+  </body>
+</html>
