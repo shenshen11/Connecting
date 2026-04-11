@@ -182,3 +182,81 @@ It also supports:
 - `UNITY_PLUGIN_API_DIR` environment variable
 
 If those headers are not found, the plugin target is skipped.
+
+---
+
+## 8. Unity runtime configuration
+
+The Unity sample sender no longer depends on a hard-coded headset IP inside the scene.
+
+Current priority order:
+
+1. Scene defaults
+2. Saved last-known-good endpoint
+3. Command-line overrides
+
+Default scene behavior:
+
+- `targetHost` is now `auto`
+- on startup the native plugin first opens the pose socket
+- if `targetHost=auto`, the plugin waits briefly for the first incoming pose packet and learns the headset IPv4 source address from that packet
+- if no pose source is available yet, the Unity controller defers startup and retries automatically
+
+Saved endpoint scope:
+
+- target host
+- video port
+- pose/control port
+
+The saved endpoint file is written to Unity's persistent-data folder:
+
+- `%USERPROFILE%/AppData/LocalLow/DefaultCompany/pc-unity-app/VideoTestUnitySender/last_successful_endpoint.json`
+
+Persistence trigger:
+
+- the Unity sender saves the endpoint after the first pose packet arrives and the native plugin exposes the source IPv4 address
+- the saved host value comes from the observed pose sender address, not from the scene's configured `targetHost`
+- this makes the saved endpoint resilient against stale scene values during bring-up
+
+### Local desktop preview
+
+The sender camera now creates a second preview camera automatically for the desktop window.
+
+Why this exists:
+
+- the capture camera renders into a `RenderTexture`
+- without a second on-screen camera, the standalone Windows player appears blank even though offscreen capture is working
+
+Current behavior:
+
+- the capture camera still renders to the encoder texture
+- a child preview camera mirrors the same transform and camera properties
+- the preview camera renders to the desktop window, so local bring-up is visible again
+
+### Supported command-line flags
+
+- `-vt-host <ipv4>`
+- `-vt-video-port <port>`
+- `-vt-pose-port <port>`
+- `-vt-width <pixels>`
+- `-vt-height <pixels>`
+- `-vt-fps <value>`
+- `-vt-bitrate <bits_per_second>`
+- `-vt-no-autostart`
+- `-vt-ignore-saved-endpoint`
+- `-vt-reset-saved-endpoint`
+
+Example:
+
+```powershell
+.\VideoTestUnitySender.exe `
+  -vt-host 10.51.101.88 `
+  -vt-video-port 25674 `
+  -vt-pose-port 25672 `
+  -vt-width 1280 `
+  -vt-height 720 `
+  -vt-fps 15 `
+  -vt-bitrate 4000000
+```
+
+If you want the player to discover the headset address automatically, just omit `-vt-host` and make sure the headset app is already sending pose traffic.

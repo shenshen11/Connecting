@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <array>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -186,14 +187,19 @@ public:
     }
 
     bool Start() {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        if (sender_thread_running_.load() || network_thread_running_.load()) {
-            return true;
-        }
+        bool should_auto_learn_target = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (sender_thread_running_.load() || network_thread_running_.load()) {
+                return true;
+            }
 
-        if (renderer_ != kUnityGfxRendererD3D11 || unity_device_ == nullptr || unity_context_ == nullptr) {
-            std::cerr << "UnitySender_Start failed: Unity D3D11 device is not ready.\n";
-            return false;
+            if (renderer_ != kUnityGfxRendererD3D11 || unity_device_ == nullptr || unity_context_ == nullptr) {
+                std::cerr << "UnitySender_Start failed: Unity D3D11 device is not ready.\n";
+                return false;
+            }
+
+            should_auto_learn_target = UsesAutoTargetHostLocked();
         }
 
         {
@@ -204,31 +210,54 @@ public:
             }
         }
 
-        if (!winsock_started_) {
-            WSADATA wsa_data{};
-            if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
-                std::cerr << "UnitySender_Start failed: WSAStartup failed.\n";
-                return false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (!winsock_started_) {
+                WSADATA wsa_data{};
+                if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+                    std::cerr << "UnitySender_Start failed: WSAStartup failed.\n";
+                    return false;
+                }
+                winsock_started_ = true;
             }
-            winsock_started_ = true;
+
+            stop_requested_.store(false);
+            copied_frame_ready_.store(false);
+            last_pose_ = LatestPoseState{};
+            last_pose_sender_ipv4_.clear();
+            pending_control_state_ = vt::windows::ControlRequestState{};
         }
 
-        stop_requested_.store(false);
-        copied_frame_ready_.store(false);
-        last_pose_ = LatestPoseState{};
-        pending_control_state_ = vt::windows::ControlRequestState{};
-
         if (!StartNetworkThread()) {
-            stop_requested_.store(true);
+            Stop();
             return false;
         }
 
+        if (should_auto_learn_target) {
+            std::string learned_host;
+            if (!WaitForPoseSenderIpv4(std::chrono::milliseconds(1500), &learned_host)) {
+                std::cerr << "UnitySender_Start deferred: target host is set to auto and no pose source was observed.\n";
+                Stop();
+                return false;
+            }
+
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            runtime_config_.host = learned_host;
+            std::cout << "unity_sender_plugin learned target host from pose source: " << learned_host << "\n";
+        }
+
+        vt::windows::SenderRuntimeConfig sender_config{};
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            sender_config = runtime_config_;
+        }
+
         sender_thread_running_.store(true);
-        sender_thread_ = std::thread([this]() {
+        sender_thread_ = std::thread([this, sender_config]() {
             UnityTextureContentSource source(this);
             vt::windows::SenderRunOptions options{};
             options.stop_requested = &stop_requested_;
-            vt::windows::RunNvencVideoSender(runtime_config_, &source, &options);
+            vt::windows::RunNvencVideoSender(sender_config, &source, &options);
             sender_thread_running_.store(false);
         });
 
@@ -304,6 +333,23 @@ public:
         out_stats->pose_packets_received = last_pose_.packets_received;
         out_stats->control_packets_received = pending_control_state_.packets_received;
         out_stats->last_pose_sequence = last_pose_.sequence;
+        return true;
+    }
+
+    bool GetLastPoseSenderIpv4(char* out_buffer, std::size_t buffer_size) const {
+        if (out_buffer == nullptr || buffer_size == 0) {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (last_pose_sender_ipv4_.empty()) {
+            out_buffer[0] = '\0';
+            return false;
+        }
+
+        const auto copy_length = std::min(buffer_size - 1, last_pose_sender_ipv4_.size());
+        std::memcpy(out_buffer, last_pose_sender_ipv4_.data(), copy_length);
+        out_buffer[copy_length] = '\0';
         return true;
     }
 
@@ -439,6 +485,29 @@ public:
     }
 
 private:
+    bool UsesAutoTargetHostLocked() const {
+        return runtime_config_.host.empty() || _stricmp(runtime_config_.host.c_str(), "auto") == 0;
+    }
+
+    bool WaitForPoseSenderIpv4(std::chrono::milliseconds timeout, std::string* out_host) const {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline && !stop_requested_.load()) {
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                if (!last_pose_sender_ipv4_.empty()) {
+                    if (out_host != nullptr) {
+                        *out_host = last_pose_sender_ipv4_;
+                    }
+                    return true;
+                }
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        return false;
+    }
+
     bool StartNetworkThread() {
         if (network_thread_running_.load()) {
             return true;
@@ -449,10 +518,9 @@ private:
             return false;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            pose_socket_ = socket;
-        }
+        // Start() already owns state_mutex_ while it performs the startup sequence.
+        // Re-locking it here would deadlock before the sender thread can launch.
+        pose_socket_ = socket;
 
         network_running_.store(true);
         network_thread_running_.store(true);
@@ -479,7 +547,7 @@ private:
                     }
 
                     received_packet = true;
-                    HandleIncomingPacket(buffer, static_cast<std::size_t>(bytes));
+                    HandleIncomingPacket(buffer, static_cast<std::size_t>(bytes), from);
                 }
 
                 if (!received_packet) {
@@ -493,7 +561,7 @@ private:
         return true;
     }
 
-    void HandleIncomingPacket(const std::uint8_t* data, std::size_t bytes) {
+    void HandleIncomingPacket(const std::uint8_t* data, std::size_t bytes, const sockaddr_in& from) {
         if (data == nullptr || bytes < sizeof(vt::proto::PacketHeader)) {
             return;
         }
@@ -514,6 +582,7 @@ private:
             std::memcpy(&payload, data + sizeof(header), sizeof(payload));
             std::lock_guard<std::mutex> lock(state_mutex_);
             vt::windows::HandleControlPayload(payload, &pending_control_state_);
+            UpdateLastPoseSenderIpv4Locked(from);
             return;
         }
 
@@ -536,6 +605,14 @@ private:
         last_pose_.timestamp_us = header.timestamp_us;
         last_pose_.has_pose = true;
         last_pose_.packets_received += 1;
+        UpdateLastPoseSenderIpv4Locked(from);
+    }
+
+    void UpdateLastPoseSenderIpv4Locked(const sockaddr_in& from) {
+        std::array<char, INET_ADDRSTRLEN> host_buffer{};
+        if (inet_ntop(AF_INET, &from.sin_addr, host_buffer.data(), static_cast<DWORD>(host_buffer.size())) != nullptr) {
+            last_pose_sender_ipv4_ = host_buffer.data();
+        }
     }
 
     bool EnsureSourceTexturesLocked() {
@@ -626,6 +703,7 @@ private:
     std::uint16_t pose_port_ = 25672;
 
     LatestPoseState last_pose_{};
+    std::string last_pose_sender_ipv4_{};
     vt::windows::ControlRequestState pending_control_state_{};
 
     SOCKET pose_socket_ = INVALID_SOCKET;
@@ -747,6 +825,10 @@ bool UnitySender_GetLatestPose(UnitySenderPose* out_pose) {
 
 bool UnitySender_GetStats(UnitySenderStats* out_stats) {
     return GetPluginState().GetStats(out_stats);
+}
+
+bool UnitySender_GetLastPoseSenderIpv4(char* out_buffer, std::size_t buffer_size) {
+    return GetPluginState().GetLastPoseSenderIpv4(out_buffer, buffer_size);
 }
 
 int UnitySender_GetCopyTextureEventId() {

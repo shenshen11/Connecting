@@ -36,3 +36,7 @@ Thumbs.db
 /pc-unity-app/[Bb]uild/
 /pc-unity-app/[Bb]uilds/
 /pc-unity-app/[Uu]ser[Ss]ettings/
+/pc-unity-app/*.csproj
+/pc-unity-app/*.sln
+/pc-unity-app/Assets/Plugins/x86_64/unity_sender_plugin.dll
+/pc-unity-app/Assets/Plugins/x86_64/unity_sender_plugin.pdb

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 
 #if defined(_WIN32)
 #define VT_UNITY_SENDER_EXPORT extern "C" __declspec(dllexport)
@@ -48,6 +49,7 @@ VT_UNITY_SENDER_EXPORT bool UnitySender_IsRunning();
 
 VT_UNITY_SENDER_EXPORT bool UnitySender_GetLatestPose(UnitySenderPose* out_pose);
 VT_UNITY_SENDER_EXPORT bool UnitySender_GetStats(UnitySenderStats* out_stats);
+VT_UNITY_SENDER_EXPORT bool UnitySender_GetLastPoseSenderIpv4(char* out_buffer, std::size_t buffer_size);
 
 VT_UNITY_SENDER_EXPORT int UnitySender_GetCopyTextureEventId();
 VT_UNITY_SENDER_EXPORT void* UnitySender_GetRenderEventFunc();

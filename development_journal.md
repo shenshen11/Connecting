@@ -1026,3 +1026,135 @@ adb shell am start -n com.videotest.nativeapp/android.app.NativeActivity --es ta
 3. Wire `GetNativeTexturePtr()` + `GL.IssuePluginEvent(...)`
 4. Poll `UnitySender_GetLatestPose(...)` from C#
 5. Validate the first real Unity scene through the existing headset decode path
+
+---
+
+## Update 2026-04-11 (Unity runtime-config layer + startup deadlock fix)
+
+### What changed
+
+- Fixed a Unity-side compile issue in:
+  - `D:\videotest\pc-unity-app\Assets\Editor\UnitySenderProjectSetup.cs`
+- Fixed a native startup deadlock in:
+  - `D:\videotest\windows-native\src\unity_sender_plugin.cpp`
+- Added Unity runtime configuration helpers:
+  - `D:\videotest\pc-unity-app\Assets\Scripts\Streaming\UnitySenderLaunchOptions.cs`
+  - `D:\videotest\pc-unity-app\Assets\Scripts\Streaming\UnitySenderRuntimeEndpointStore.cs`
+- Extended:
+  - `D:\videotest\pc-unity-app\Assets\Scripts\Streaming\UnitySenderController.cs`
+  - `D:\videotest\pc-unity-app\Assets\Editor\UnitySenderProjectSetup.cs`
+
+### Problems encountered
+
+1. The Unity editor setup script used `Vector3` where `Material.color` requires `Color`.
+2. The editor setup script also needed the `VideoTest.UnityIntegration` namespace imported to resolve `UnitySenderController`.
+3. The first native Unity sender bring-up could compile and build, but the standalone player appeared to hang before any sender log was printed.
+
+### Root cause of the runtime hang
+
+- `UnitySenderPluginState::Start()` held `state_mutex_`
+- it then called `StartNetworkThread()`
+- `StartNetworkThread()` tried to lock the same mutex again before launching the UDP receive thread
+- that created a self-deadlock during startup
+
+### Fix
+
+- Removed the redundant nested lock when assigning `pose_socket_` during startup
+- rebuilt `unity_sender_plugin.dll`
+- reinstalled the rebuilt DLL into the Unity project
+- rebuilt the standalone Windows player
+
+### Why the Unity runtime-config layer was added now
+
+- The sample scene still contained a stale hard-coded endpoint
+- requiring scene edits or rebuilds for every IP change is not viable once Unity becomes a real content source
+- the Android side already uses the pattern:
+  - defaults
+  - last-known-good config
+  - launch-time override
+- Unity should follow the same operational model
+
+### New Unity runtime behavior
+
+- Unity resolves config in this order:
+  1. scene defaults
+  2. saved endpoint
+  3. command-line overrides
+- only the network endpoint is persisted
+- encode parameters remain scene/command-line controlled, which avoids silently carrying old test bitrate or resolution into later runs
+- the native plugin now records the IPv4 source address of the latest incoming pose packet
+- Unity persists that observed pose-sender IP as the last-known-good target endpoint
+
+### Why the persistence trigger changed
+
+- the earlier design tried to save only after the first control packet
+- real device logs showed that the Android side could successfully decode the first frame without the Unity side ever observing a startup control packet
+- that made the control-packet trigger too strict for the current implementation
+- using the observed pose sender IP is more robust:
+  - pose traffic already exists in every successful session
+  - the source IP comes from the real headset packet path
+  - Unity no longer has to trust a possibly stale configured `targetHost` when saving the next-run endpoint
+
+### Verification
+
+- `UnitySenderProjectSetup.ApplyAll` completed successfully in batchmode
+- Unity scripts compiled successfully
+- standalone build produced:
+  - `D:\videotest\pc-unity-app\Builds\Windows\VideoTestUnitySender.exe`
+- standalone smoke test reached:
+  - `UnitySenderController started. ...`
+- command-line and persistence support are now wired into the Unity player startup path
+
+### Tradeoff
+
+- This is still not full auto-discovery
+- it is a pragmatic middle step that avoids rebuilds and supports stable repeated runs
+- a future refinement can teach the Windows sender to learn the headset endpoint directly from incoming packets and then start the sender with that discovered address
+
+---
+
+## Update 2026-04-11 (Unity local preview + auto target-host learning)
+
+### What changed
+
+- The Unity sample scene now defaults to:
+  - `targetHost = auto`
+  - local desktop preview enabled
+  - automatic retry enabled when `auto` is waiting for pose traffic
+- Updated:
+  - `D:\videotest\pc-unity-app\Assets\Scripts\Streaming\UnitySenderController.cs`
+  - `D:\videotest\pc-unity-app\Assets\Editor\UnitySenderProjectSetup.cs`
+  - `D:\videotest\windows-native\src\unity_sender_plugin.cpp`
+
+### Problem clarified
+
+There were two separate issues behind the user-facing symptom:
+
+1. The standalone Windows player looked blank locally because the only camera was redirected into a `RenderTexture` for encoding.
+2. A no-argument launch still could not send video to the headset, because there was no valid headset IP unless the user passed `-vt-host` or already had a saved endpoint.
+
+### Fixes
+
+- Added a mirrored desktop preview camera so the local player window still shows the scene.
+- Changed the default scene behavior from `127.0.0.1` to `auto`.
+- The native plugin now:
+  - opens the pose socket first
+  - waits briefly for the first pose packet when `targetHost=auto`
+  - learns the headset IPv4 address from the pose sender source address
+  - starts NVENC/video send only after that address is known
+- If no pose source is ready yet, the Unity controller does not silently send to localhost.
+  Instead it logs a deferred-start message and retries automatically.
+
+### Verification
+
+- Standalone player log now shows local preview creation:
+  - `UnitySenderController created a local preview camera for the desktop window.`
+- A captured desktop screenshot confirmed that the standalone player window renders the test scene again.
+- No-pose startup now behaves as a controlled defer/retry path instead of a silent localhost send.
+- Mock pose test confirmed automatic startup and endpoint persistence without passing `-vt-host`.
+- Explicit headset-IP startup still works; Android logs confirmed codec-config reception and decoder configuration after the Unity-side changes.
+
+### Tradeoff
+
+- `auto` startup depends on the headset already producing pose traffic within the retry window.
+- That is still a bring-up constraint, but it is materially better than requiring a manual rebuild or silently using `127.0.0.1`.
