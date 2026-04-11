@@ -6,6 +6,7 @@
 #include "video_sender_core.h"
 
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -29,6 +30,27 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr int kRenderEventCopyTexture = 0;
+
+class ImmediateContextGuard final {
+public:
+    explicit ImmediateContextGuard(ID3D11Multithread* multithread) : multithread_(multithread) {
+        if (multithread_ != nullptr) {
+            multithread_->Enter();
+        }
+    }
+
+    ~ImmediateContextGuard() {
+        if (multithread_ != nullptr) {
+            multithread_->Leave();
+        }
+    }
+
+    ImmediateContextGuard(const ImmediateContextGuard&) = delete;
+    ImmediateContextGuard& operator=(const ImmediateContextGuard&) = delete;
+
+private:
+    ID3D11Multithread* multithread_ = nullptr;
+};
 
 void NormalizeQuaternion(vt::proto::Quatf* q) {
     const float len_sq = q->x * q->x + q->y * q->y + q->z * q->z + q->w * q->w;
@@ -123,6 +145,18 @@ public:
             ID3D11DeviceContext* immediate_context = nullptr;
             unity_device_->GetImmediateContext(&immediate_context);
             unity_context_.Attach(immediate_context);
+
+            ComPtr<ID3D11Multithread> multithread;
+            if (SUCCEEDED(unity_context_.As(&multithread)) && multithread != nullptr) {
+                const BOOL was_protected = multithread->SetMultithreadProtected(TRUE);
+                unity_multithread_ = multithread;
+                std::cout << "unity_sender_plugin enabled D3D11 multithread protection"
+                          << " previous=" << (was_protected ? "on" : "off") << "\n";
+            } else {
+                std::cerr << "unity_sender_plugin could not query ID3D11Multithread from Unity immediate context.\n";
+                unity_multithread_.Reset();
+            }
+
             std::cout << "unity_sender_plugin initialized with Unity D3D11 device.\n";
             return;
         }
@@ -133,6 +167,7 @@ public:
             std::lock_guard<std::mutex> lock(state_mutex_);
             renderer_ = kUnityGfxRendererNull;
             unity_context_.Reset();
+            unity_multithread_.Reset();
             unity_device_.Reset();
             source_texture_.Reset();
             copied_texture_.Reset();
@@ -366,6 +401,7 @@ public:
             return;
         }
 
+        ImmediateContextGuard context_guard(unity_multithread_.Get());
         unity_context_->CopyResource(copied_texture_.Get(), source_texture_.Get());
         copied_frame_ready_.store(true);
         render_thread_copy_count_ += 1;
@@ -430,9 +466,15 @@ public:
 
     void BeforeEncodeCopy() {
         texture_mutex_.lock();
+        if (unity_multithread_ != nullptr) {
+            unity_multithread_->Enter();
+        }
     }
 
     void AfterEncodeCopy() {
+        if (unity_multithread_ != nullptr) {
+            unity_multithread_->Leave();
+        }
         texture_mutex_.unlock();
     }
 
@@ -687,6 +729,7 @@ private:
 
     ComPtr<ID3D11Device> unity_device_;
     ComPtr<ID3D11DeviceContext> unity_context_;
+    ComPtr<ID3D11Multithread> unity_multithread_;
 
     void* pending_texture_handle_ = nullptr;
     void* current_texture_handle_ = nullptr;
