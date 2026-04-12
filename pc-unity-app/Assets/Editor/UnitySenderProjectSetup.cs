@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -17,6 +18,7 @@ namespace VideoTest.UnityIntegration.Editor
         {
             ApplyRecommendedProjectSettings();
             InstallPluginBinary();
+            ConfigurePluginImporter();
             SetupSampleScene();
             AssetDatabase.Refresh();
             Debug.Log("VideoTest Unity sender setup applied.");
@@ -78,7 +80,42 @@ namespace VideoTest.UnityIntegration.Editor
             }
 
             AssetDatabase.Refresh();
+            ConfigurePluginImporter();
             Debug.Log($"Installed local native plugin binary from {sourceDll}");
+        }
+
+        [MenuItem("VideoTest/Configure Native Plugin Importer")]
+        public static void ConfigurePluginImporter()
+        {
+            ConfigurePluginImporterAtPath("Assets/Plugins/x86_64/unity_sender_plugin.dll");
+            ConfigurePluginImporterAtPath("Assets/Plugins/x86_64/unity_sender_plugin.pdb");
+            AssetDatabase.WriteImportSettingsIfDirty("Assets/Plugins/x86_64/unity_sender_plugin.dll");
+            AssetDatabase.Refresh();
+        }
+
+        [MenuItem("VideoTest/Validate Native Plugin Load In Editor")]
+        public static void ValidateNativePluginLoadInEditor()
+        {
+            try
+            {
+                var isRunning = UnitySenderPluginBindings.UnitySender_IsRunning();
+                Debug.Log($"Unity sender native plugin loaded successfully in Editor. isRunning={isRunning}");
+            }
+            catch (DllNotFoundException ex)
+            {
+                Debug.LogError($"Unity sender native plugin failed to load in Editor: {ex.Message}");
+                throw;
+            }
+            catch (EntryPointNotFoundException ex)
+            {
+                Debug.LogError($"Unity sender native plugin entry point mismatch in Editor: {ex.Message}");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"Unity sender native plugin validation failed in Editor: {ex}");
+                throw;
+            }
         }
 
         [MenuItem("VideoTest/Setup Sample Scene")]
@@ -130,6 +167,8 @@ namespace VideoTest.UnityIntegration.Editor
             serializedObject.FindProperty("recenterKey").enumValueIndex = (int)KeyCode.R;
             serializedObject.FindProperty("showLocalPreview").boolValue = true;
             serializedObject.FindProperty("previewCameraDepthOffset").floatValue = 1.0f;
+            serializedObject.FindProperty("showDebugOverlay").boolValue = true;
+            serializedObject.FindProperty("toggleDebugOverlayKey").enumValueIndex = (int)KeyCode.F1;
             serializedObject.FindProperty("allowCommandLineOverrides").boolValue = true;
             serializedObject.FindProperty("useSavedEndpoint").boolValue = true;
             serializedObject.FindProperty("rememberSuccessfulEndpoint").boolValue = true;
@@ -141,7 +180,7 @@ namespace VideoTest.UnityIntegration.Editor
 
         private static void EnsureDirectionalLight()
         {
-            foreach (var light in Object.FindObjectsOfType<Light>())
+            foreach (var light in UnityEngine.Object.FindObjectsOfType<Light>())
             {
                 if (light.type == LightType.Directional)
                 {
@@ -179,6 +218,22 @@ namespace VideoTest.UnityIntegration.Editor
                 }
                 material.color = color;
             }
+        }
+
+        private static void ConfigurePluginImporterAtPath(string assetPath)
+        {
+            if (!(AssetImporter.GetAtPath(assetPath) is PluginImporter pluginImporter))
+            {
+                return;
+            }
+
+            pluginImporter.SetCompatibleWithAnyPlatform(false);
+            pluginImporter.SetCompatibleWithEditor(assetPath.EndsWith(".dll"));
+            pluginImporter.SetCompatibleWithPlatform(BuildTarget.StandaloneWindows64, assetPath.EndsWith(".dll"));
+            pluginImporter.SetCompatibleWithPlatform(BuildTarget.StandaloneWindows, false);
+            pluginImporter.SetCompatibleWithPlatform(BuildTarget.StandaloneLinux64, false);
+            pluginImporter.SetCompatibleWithPlatform(BuildTarget.StandaloneOSX, false);
+            pluginImporter.SaveAndReimport();
         }
     }
 }

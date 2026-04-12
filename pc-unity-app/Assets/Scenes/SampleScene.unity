@@ -438,6 +438,8 @@ MonoBehaviour:
   recenterKey: 293
   showLocalPreview: 1
   previewCameraDepthOffset: 1
+  showDebugOverlay: 1
+  toggleDebugOverlayKey: 464
   allowCommandLineOverrides: 1
   useSavedEndpoint: 1
   rememberSuccessfulEndpoint: 1

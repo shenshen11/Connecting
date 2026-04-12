@@ -285,6 +285,7 @@ int RunNvencVideoSender(const SenderRuntimeConfig& requested_config,
         const auto start_time = std::chrono::steady_clock::now();
         const std::uint32_t keyframe_interval = static_cast<std::uint32_t>(std::max(config.fps, 1));
         std::uint32_t frame_index = 1;
+        bool has_sent_video_access_unit = false;
         ControlRequestState control_state{};
 
         std::cout << source->SenderName() << " -> " << config.host << ":" << config.video_port
@@ -336,7 +337,7 @@ int RunNvencVideoSender(const SenderRuntimeConfig& requested_config,
             const bool force_idr =
                 control_state.request_keyframe ||
                 control_state.request_codec_config ||
-                (frame_index == 1) ||
+                !has_sent_video_access_unit ||
                 ((frame_index % keyframe_interval) == 0);
 
             std::vector<std::vector<std::uint8_t>> packets;
@@ -356,6 +357,7 @@ int RunNvencVideoSender(const SenderRuntimeConfig& requested_config,
                 ++packet_frame_id;
                 SendEncodedFrame(
                     video_socket, target, packet_frame_id, config.width, config.height, flags, access_unit);
+                has_sent_video_access_unit = true;
             }
 
             if (frame_index <= 5 || (frame_index % std::max(source->FrameLogInterval(), 1u)) == 0 || force_idr) {
