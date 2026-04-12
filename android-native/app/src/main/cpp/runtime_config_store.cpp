@@ -100,7 +100,14 @@ bool LoadPersistedRuntimeConfig(android_app* app, RuntimeConfig* config, std::st
         }
 
         if (key == "target_port") {
-            loaded.target_port = port;
+            loaded.pose_target_port = port;
+            loaded.control_target_port = port;
+            used_any = true;
+        } else if (key == "pose_target_port") {
+            loaded.pose_target_port = port;
+            used_any = true;
+        } else if (key == "control_target_port") {
+            loaded.control_target_port = port;
             used_any = true;
         } else if (key == "video_port") {
             loaded.video_port = port;
@@ -271,9 +278,22 @@ bool ApplyIntentRuntimeConfig(android_app* app, JNIEnv* env, RuntimeConfig* conf
         used_any = true;
     }
 
-    std::uint16_t port_value = config->target_port;
+    std::uint16_t port_value = config->pose_target_port;
     if (GetIntExtra(env, intent, "target_port", &port_value)) {
-        config->target_port = port_value;
+        config->pose_target_port = port_value;
+        config->control_target_port = port_value;
+        used_any = true;
+    }
+
+    port_value = config->pose_target_port;
+    if (GetIntExtra(env, intent, "pose_target_port", &port_value)) {
+        config->pose_target_port = port_value;
+        used_any = true;
+    }
+
+    port_value = config->control_target_port;
+    if (GetIntExtra(env, intent, "control_target_port", &port_value)) {
+        config->control_target_port = port_value;
         used_any = true;
     }
 
@@ -306,9 +326,10 @@ RuntimeConfigResolveResult ResolveRuntimeConfig(android_app* app, JNIEnv* env, R
 
     __android_log_print(ANDROID_LOG_INFO,
                         kLogTag,
-                        "Resolved runtime config target=%s:%u video_port=%u encoded_video_port=%u source=%s%s%s",
+                        "Resolved runtime config target=%s pose_target_port=%u control_target_port=%u video_port=%u encoded_video_port=%u source=%s%s%s",
                         config->target_host.c_str(),
-                        static_cast<unsigned>(config->target_port),
+                        static_cast<unsigned>(config->pose_target_port),
+                        static_cast<unsigned>(config->control_target_port),
                         static_cast<unsigned>(config->video_port),
                         static_cast<unsigned>(config->encoded_video_port),
                         "defaults",
@@ -337,7 +358,11 @@ bool SaveLastSuccessfulRuntimeConfig(android_app* app, const RuntimeConfig& conf
 
     output << "# Saved after first successful decoded frame\n";
     output << "target_host=" << config.target_host << "\n";
-    output << "target_port=" << config.target_port << "\n";
+    if (config.pose_target_port == config.control_target_port) {
+        output << "target_port=" << config.pose_target_port << "\n";
+    }
+    output << "pose_target_port=" << config.pose_target_port << "\n";
+    output << "control_target_port=" << config.control_target_port << "\n";
     output << "video_port=" << config.video_port << "\n";
     output << "encoded_video_port=" << config.encoded_video_port << "\n";
     output.close();
@@ -361,9 +386,10 @@ bool SaveLastSuccessfulRuntimeConfig(android_app* app, const RuntimeConfig& conf
 
     __android_log_print(ANDROID_LOG_INFO,
                         kLogTag,
-                        "Saved last successful runtime config target=%s:%u path=%s",
+                        "Saved last successful runtime config target=%s pose_target_port=%u control_target_port=%u path=%s",
                         config.target_host.c_str(),
-                        static_cast<unsigned>(config.target_port),
+                        static_cast<unsigned>(config.pose_target_port),
+                        static_cast<unsigned>(config.control_target_port),
                         path.c_str());
     return true;
 }

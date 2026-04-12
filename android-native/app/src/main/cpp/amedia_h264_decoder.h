@@ -30,6 +30,7 @@ public:
     bool HasRenderedFrame() const noexcept { return has_rendered_frame_; }
     std::uint64_t QueuedFrameCount() const noexcept { return queued_input_frames_; }
     std::uint64_t RenderedFrameCount() const noexcept { return rendered_output_frames_; }
+    std::uint16_t CurrentStreamFlags() const noexcept { return current_stream_flags_; }
     std::uint32_t ConsumePendingControlRequests(std::uint32_t* related_frame_id) noexcept;
 
 private:
@@ -47,6 +48,7 @@ private:
     bool configured_ = false;
     bool started_ = false;
     bool has_rendered_frame_ = false;
+    std::uint16_t current_stream_flags_ = 0;
     std::uint16_t width_ = 0;
     std::uint16_t height_ = 0;
     std::uint64_t received_frame_count_ = 0;

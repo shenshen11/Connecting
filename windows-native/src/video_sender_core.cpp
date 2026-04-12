@@ -258,6 +258,7 @@ int RunNvencVideoSender(const SenderRuntimeConfig& requested_config,
 
         std::vector<std::uint8_t> sequence_params;
         std::uint32_t packet_frame_id = 0;
+        const std::uint16_t source_frame_flags = source->EncodedFrameFlags();
         auto send_codec_config = [&](const char* reason) {
             sequence_params.clear();
             encoder.GetSequenceParams(sequence_params);
@@ -271,7 +272,10 @@ int RunNvencVideoSender(const SenderRuntimeConfig& requested_config,
                              packet_frame_id,
                              config.width,
                              config.height,
-                             vt::proto::VideoFrameFlagCodecConfig | vt::proto::VideoFrameFlagKeyframe,
+                             static_cast<std::uint16_t>(
+                                 vt::proto::VideoFrameFlagCodecConfig |
+                                 vt::proto::VideoFrameFlagKeyframe |
+                                 source_frame_flags),
                              sequence_params);
             std::cout << "sent codec config packet_id=" << packet_frame_id
                       << " bytes=" << sequence_params.size()
@@ -352,8 +356,9 @@ int RunNvencVideoSender(const SenderRuntimeConfig& requested_config,
 
             std::vector<std::uint8_t> access_unit = FlattenAccessUnit(packets);
             if (!access_unit.empty()) {
-                const std::uint16_t flags =
-                    force_idr ? vt::proto::VideoFrameFlagKeyframe : vt::proto::VideoFrameFlagNone;
+                const std::uint16_t flags = static_cast<std::uint16_t>(
+                    (force_idr ? vt::proto::VideoFrameFlagKeyframe : vt::proto::VideoFrameFlagNone) |
+                    source_frame_flags);
                 ++packet_frame_id;
                 SendEncodedFrame(
                     video_socket, target, packet_frame_id, config.width, config.height, flags, access_unit);

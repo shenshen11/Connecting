@@ -56,6 +56,7 @@ void AMediaH264Decoder::Shutdown() {
 
 bool AMediaH264Decoder::OnFrame(const EncodedVideoFrame& frame) {
     received_frame_count_ += 1;
+    current_stream_flags_ = frame.flags;
 
     if (output_window_ == nullptr) {
         if (received_frame_count_ <= kVerboseFrameCount) {
@@ -325,6 +326,7 @@ bool AMediaH264Decoder::BootstrapDecoderFromFrame(const EncodedVideoFrame& frame
 void AMediaH264Decoder::ResetDecoder() {
     configured_ = false;
     started_ = false;
+    current_stream_flags_ = 0;
     width_ = 0;
     height_ = 0;
     queued_input_frames_ = 0;

@@ -65,6 +65,7 @@ public:
     virtual std::string StartupDetails() const = 0;
 
     virtual std::string FrameLogSuffix() const { return {}; }
+    virtual std::uint16_t EncodedFrameFlags() const noexcept { return 0; }
     virtual void BeforeEncodeCopy() {}
     virtual void AfterEncodeCopy() {}
     virtual void Shutdown() noexcept {}

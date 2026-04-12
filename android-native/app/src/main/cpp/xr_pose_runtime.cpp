@@ -61,17 +61,30 @@ bool XrPoseRuntime::Initialize(android_app* app, const RuntimeConfig& config, st
     app_ = app;
     config_ = config;
 
-    SenderConfig sender_config{};
-    sender_config.host = config_.target_host;
-    sender_config.port = config_.target_port;
-    if (!sender_.Open(sender_config)) {
+    SenderConfig pose_sender_config{};
+    pose_sender_config.host = config_.target_host;
+    pose_sender_config.port = config_.pose_target_port;
+    if (!pose_sender_.Open(pose_sender_config)) {
         if (error != nullptr) {
             *error = "Failed to open UDP pose sender.";
         }
         return false;
     }
 
+    SenderConfig control_sender_config{};
+    control_sender_config.host = config_.target_host;
+    control_sender_config.port = config_.control_target_port;
+    if (!control_sender_.Open(control_sender_config)) {
+        pose_sender_.Close();
+        if (error != nullptr) {
+            *error = "Failed to open UDP control sender.";
+        }
+        return false;
+    }
+
     if (!video_receiver_.Start(config_.video_port)) {
+        control_sender_.Close();
+        pose_sender_.Close();
         if (error != nullptr) {
             *error = "Failed to start UDP video receiver.";
         }
@@ -79,6 +92,9 @@ bool XrPoseRuntime::Initialize(android_app* app, const RuntimeConfig& config, st
     }
 
     if (!encoded_video_receiver_.Start(config_.encoded_video_port)) {
+        video_receiver_.Stop();
+        control_sender_.Close();
+        pose_sender_.Close();
         if (error != nullptr) {
             *error = "Failed to start UDP encoded-video receiver.";
         }
@@ -113,9 +129,11 @@ bool XrPoseRuntime::Initialize(android_app* app, const RuntimeConfig& config, st
     __android_log_print(
         ANDROID_LOG_INFO,
         kLogTag,
-        "OpenXR runtime initialized. target=%s:%u",
+        "OpenXR runtime initialized. pose_target=%s:%u control_target=%s:%u",
         config_.target_host.c_str(),
-        static_cast<unsigned>(config_.target_port));
+        static_cast<unsigned>(config_.pose_target_port),
+        config_.target_host.c_str(),
+        static_cast<unsigned>(config_.control_target_port));
 
     return true;
 }
@@ -144,7 +162,8 @@ void XrPoseRuntime::Shutdown() {
     egl_.Shutdown();
     encoded_video_receiver_.Stop();
     video_receiver_.Stop();
-    sender_.Close();
+    control_sender_.Close();
+    pose_sender_.Close();
 
     session_running_ = false;
     session_state_ = XR_SESSION_STATE_UNKNOWN;
@@ -757,7 +776,9 @@ void XrPoseRuntime::RunFrame() {
     std::vector<XrCompositionLayerBaseHeader*> layers;
     XrCompositionLayerQuad quad_layer{XR_TYPE_COMPOSITION_LAYER_QUAD};
     XrCompositionLayerImageLayoutFB image_layout{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
-    if (composition_layer_image_layout_enabled_) {
+    const bool should_vertical_flip_encoded_video =
+        (h264_decoder_.CurrentStreamFlags() & vt::proto::VideoFrameFlagVerticalFlip) != 0;
+    if (composition_layer_image_layout_enabled_ && should_vertical_flip_encoded_video) {
         image_layout.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
         quad_layer.next = &image_layout;
     }
@@ -881,7 +902,7 @@ bool XrPoseRuntime::SendHeadPose(XrTime predicted_display_time) {
     header.sequence = pose_sequence_++;
     header.timestamp_us = vt::proto::NowMicroseconds();
 
-    const bool sent = sender_.SendPose(header, pose);
+    const bool sent = pose_sender_.SendPose(header, pose);
     if (sent) {
         frames_sent_ += 1;
         if (frames_sent_ <= 5 || (frames_sent_ % 120) == 0) {
@@ -920,7 +941,7 @@ bool XrPoseRuntime::SendControlMessage(vt::proto::ControlMessageType message_typ
     payload.value0 = value0;
     payload.value1 = value1;
 
-    const bool sent = sender_.SendControl(header, payload);
+    const bool sent = control_sender_.SendControl(header, payload);
     if (sent) {
         __android_log_print(ANDROID_LOG_INFO,
                             kLogTag,

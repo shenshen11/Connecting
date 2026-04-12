@@ -19,6 +19,7 @@ enum VideoFrameFlags : std::uint16_t {
     VideoFrameFlagNone = 0,
     VideoFrameFlagCodecConfig = 1 << 0,
     VideoFrameFlagKeyframe = 1 << 1,
+    VideoFrameFlagVerticalFlip = 1 << 2,
 };
 
 #pragma pack(push, 1)

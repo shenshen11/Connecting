@@ -19,7 +19,8 @@ namespace vt::android {
 
 struct RuntimeConfig final {
     std::string target_host = "192.168.1.100";
-    std::uint16_t target_port = 25672;
+    std::uint16_t pose_target_port = 25672;
+    std::uint16_t control_target_port = 25672;
     std::uint16_t video_port = 25673;
     std::uint16_t encoded_video_port = 25674;
 };
@@ -62,7 +63,8 @@ private:
 
     android_app* app_ = nullptr;
     RuntimeConfig config_{};
-    UdpPoseSender sender_{};
+    UdpPoseSender pose_sender_{};
+    UdpPoseSender control_sender_{};
     UdpVideoReceiver video_receiver_{};
     UdpEncodedVideoReceiver encoded_video_receiver_{};
     AMediaH264Decoder h264_decoder_{};
