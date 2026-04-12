@@ -290,6 +290,68 @@ Unity Editor 日志随后出现：
 
 也就是说，本轮目标已经达成。
 
+### 8.1 后续补充：VR 端画面上下反转
+
+在双向链路跑通后，又暴露出一个后续问题：
+
+- VR 端可以看到 Unity 画面；
+- pose 也已经正常回传；
+- 但 **头显里看到的画面是上下反转的**。
+
+这个现象说明：
+
+- 编码和传输本身已经在工作；
+- 问题更可能出在 **头显显示阶段对图像坐标原点的理解**，而不是 Unity 场景本身画错了。
+
+#### 排查思路
+
+这次没有直接去猜 Unity 侧要不要手工翻转 `RenderTexture`，而是先核对头显 OpenXR 运行时对 composition layer image layout 的支持情况。
+
+在设备扩展列表中确认到了：
+
+- `XR_FB_composition_layer_image_layout`
+
+同时在 OpenXR 定义里确认：
+
+- `XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB`
+
+它的语义正是：
+
+> 告诉运行时当前 composition layer 对应的 swapchain 图像应按“垂直翻转”的方式解释。
+
+这比在 Unity、NVENC 或像素缓冲层手工倒置更合适，因为问题本质上发生在 **头显运行时如何解释该图像的坐标系**。
+
+#### 最终修复
+
+在 Android OpenXR 侧做了以下修改：
+
+- `D:\videotest\android-native\app\src\main\cpp\xr_pose_runtime.cpp:220`
+  - 如果设备支持，则把 `XR_FB_composition_layer_image_layout` 加入实例启用扩展列表
+- `D:\videotest\android-native\app\src\main\cpp\xr_pose_runtime.cpp:756`
+  - 为视频 `XrCompositionLayerQuad` 挂接 `XrCompositionLayerImageLayoutFB`
+  - 设置 `XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB`
+- `D:\videotest\android-native\app\src\main\cpp\xr_pose_runtime.h:100`
+  - 增加运行时布尔开关，记录该扩展是否已启用
+
+#### 验证方式
+
+修复后做了这些确认：
+
+1. Android 工程重新 `assembleDebug` 编译通过；
+2. 新 APK 安装到头显成功；
+3. 启动日志中确认出现：
+   - `Enabling OpenXR extension: XR_FB_composition_layer_image_layout`
+4. 实机观察确认：
+   - VR 端画面方向恢复正常。
+
+#### 这一问题带来的经验
+
+这次的关键经验是：
+
+- 当链路已经打通，但显示方向异常时，不要立刻在 Unity 或编码层做像素翻转；
+- 应优先确认 **目标显示运行时是否提供标准的 image layout / vertical flip 能力**；
+- 如果运行时原生支持，应优先使用运行时标准扩展，而不是在上游链路增加额外转换。
+
 ---
 
 ## 9. 为避免重复踩坑做的工程化补充
@@ -368,11 +430,13 @@ Unity Editor 日志随后出现：
 - `D:\videotest\pc-unity-app\Assets\Scripts\Streaming\UnitySenderController.cs:260`
 - `D:\videotest\windows-native\src\unity_sender_plugin.cpp:31`
 - `D:\videotest\windows-native\src\video_sender_core.cpp:285`
+- `D:\videotest\android-native\app\src\main\cpp\xr_pose_runtime.cpp:220`
+- `D:\videotest\android-native\app\src\main\cpp\xr_pose_runtime.h:100`
 - `D:\videotest\tools\sync_editor_runtime.ps1:1`
 
 ---
 
 ## 12. 一句话结论
 
-这次问题最终不是单一 bug，而是 **“Unity 纹理格式兼容 + NVENC 首关键帧策略 + 换网后双端缓存地址失效 + XR 生命周期状态判断”** 共同叠加出来的结果。  
+这次问题最终不是单一 bug，而是 **“Unity 纹理格式兼容 + NVENC 首关键帧策略 + 换网后双端缓存地址失效 + XR 生命周期状态判断 + 头显 composition layer 图像布局解释”** 共同叠加出来的结果。  
 真正把 Editor Play 跑通的关键，是在逐层确认事实之后，把这几层问题分别拆开并逐个闭环。

@@ -217,12 +217,21 @@ bool XrPoseRuntime::CreateInstance(android_app* app, std::string* error) {
         return false;
     }
 
-    std::array<const char*, 5> required_extensions = {
+    std::vector<const char*> required_extensions = {
         XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
         XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
         XR_KHR_ANDROID_SURFACE_SWAPCHAIN_EXTENSION_NAME,
         XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME,
         XR_FB_SWAPCHAIN_UPDATE_STATE_ANDROID_SURFACE_EXTENSION_NAME};
+
+    composition_layer_image_layout_enabled_ = SupportsExtension(XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
+    if (composition_layer_image_layout_enabled_) {
+        required_extensions.push_back(XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
+        __android_log_print(ANDROID_LOG_INFO,
+                            kLogTag,
+                            "Enabling OpenXR extension: %s",
+                            XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
+    }
 
     XrInstanceCreateInfoAndroidKHR android_create_info{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     android_create_info.applicationVM = app->activity->vm;
@@ -747,6 +756,11 @@ void XrPoseRuntime::RunFrame() {
 
     std::vector<XrCompositionLayerBaseHeader*> layers;
     XrCompositionLayerQuad quad_layer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    XrCompositionLayerImageLayoutFB image_layout{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
+    if (composition_layer_image_layout_enabled_) {
+        image_layout.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
+        quad_layer.next = &image_layout;
+    }
     if (h264_decoder_.HasRenderedFrame() && android_surface_swapchain_ != XR_NULL_HANDLE) {
         quad_layer.space = app_space_;
         quad_layer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;

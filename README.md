@@ -13,6 +13,7 @@
   - Unity Editor 渲染画面可发送到 VR 端。
   - VR 端 pose 可实时回传到 Unity。
   - Unity 相机可根据回传 pose 更新。
+  - VR 端画面上下反转问题已修复。
 
 ## 当前技术路线
 
@@ -69,6 +70,20 @@ powershell -ExecutionPolicy Bypass -File D:\videotest\tools\sync_editor_runtime.
 - Unity 状态从 `pose=default` 变为 `pose=active`；
 - 头显端持续出现 `Pose sent`；
 - 头显端持续出现 `Rendered output frame`。
+
+### 5. 常见问题
+
+#### VR 端画面上下反转
+
+如果 VR 端能看到画面，但方向上下颠倒，优先检查头显侧 OpenXR 组合层是否正确声明了图像布局。
+
+当前仓库中的修复方式是：
+
+- 在 `android-native/app/src/main/cpp/xr_pose_runtime.cpp` 中启用 `XR_FB_composition_layer_image_layout`
+- 给视频 `XrCompositionLayerQuad` 挂接 `XrCompositionLayerImageLayoutFB`
+- 设置 `XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB`
+
+这样可以告诉设备运行时：当前 swapchain 图像需要按垂直翻转解释，而不是在 Unity 或编码路径里做额外的像素翻转。
 
 ## 目录说明
 

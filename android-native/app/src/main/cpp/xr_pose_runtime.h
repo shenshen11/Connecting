@@ -97,6 +97,7 @@ private:
     std::uint32_t encoded_height_ = 360;
     bool logged_waiting_for_decoded_frame_ = false;
     bool logged_surface_layer_active_ = false;
+    bool composition_layer_image_layout_enabled_ = false;
 };
 
 }  // namespace vt::android
