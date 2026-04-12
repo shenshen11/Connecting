@@ -260,11 +260,27 @@ namespace VideoTest.UnityIntegration
                 Destroy(captureTexture);
             }
 
-            captureTexture = new RenderTexture(encodeWidth, encodeHeight, 24, RenderTextureFormat.ARGB32)
+            var captureFormat = SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.BGRA32)
+                ? RenderTextureFormat.BGRA32
+                : RenderTextureFormat.ARGB32;
+            if (captureFormat != RenderTextureFormat.BGRA32)
+            {
+                Debug.LogWarning(
+                    "UnitySenderController could not allocate a BGRA32 RenderTexture. " +
+                    "The native NVENC path expects BGRA input, so streaming may fail until a conversion path is added.");
+            }
+
+            captureTexture = new RenderTexture(
+                encodeWidth,
+                encodeHeight,
+                24,
+                captureFormat,
+                RenderTextureReadWrite.Linear)
             {
                 name = "UnitySenderCaptureTexture",
                 useMipMap = false,
-                autoGenerateMips = false
+                autoGenerateMips = false,
+                antiAliasing = 1
             };
             captureTexture.Create();
             captureCamera.targetTexture = captureTexture;

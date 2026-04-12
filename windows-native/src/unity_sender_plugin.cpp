@@ -31,6 +31,29 @@ using Microsoft::WRL::ComPtr;
 
 constexpr int kRenderEventCopyTexture = 0;
 
+const char* DxgiFormatName(DXGI_FORMAT format) {
+    switch (format) {
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+            return "DXGI_FORMAT_B8G8R8A8_UNORM";
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+            return "DXGI_FORMAT_B8G8R8A8_TYPELESS";
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            return "DXGI_FORMAT_B8G8R8A8_UNORM_SRGB";
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+            return "DXGI_FORMAT_R8G8B8A8_UNORM";
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            return "DXGI_FORMAT_R8G8B8A8_UNORM_SRGB";
+        default:
+            return "DXGI_FORMAT_OTHER";
+    }
+}
+
+bool IsNvencArgbCopyCompatibleFormat(DXGI_FORMAT format) {
+    return format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+           format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+           format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+}
+
 class ImmediateContextGuard final {
 public:
     explicit ImmediateContextGuard(ID3D11Multithread* multithread) : multithread_(multithread) {
@@ -684,6 +707,30 @@ private:
             return false;
         }
 
+        const bool should_log_format = !source_format_logged_ || source_format_ != desc.Format;
+        source_format_ = desc.Format;
+        source_format_logged_ = true;
+        if (should_log_format) {
+            std::cout << "unity_sender_plugin source texture format="
+                      << DxgiFormatName(desc.Format)
+                      << " (" << static_cast<unsigned>(desc.Format) << ")"
+                      << " size=" << desc.Width << "x" << desc.Height
+                      << std::endl;
+        }
+
+        if (!IsNvencArgbCopyCompatibleFormat(desc.Format)) {
+            if (!source_format_error_logged_) {
+                std::cerr << "Unity sender source texture format is not compatible with the current NVENC ARGB path. "
+                          << "source=" << DxgiFormatName(desc.Format)
+                          << " (" << static_cast<unsigned>(desc.Format) << ")"
+                          << " required=DXGI_FORMAT_B8G8R8A8_UNORM. "
+                          << "Use a BGRA32 Linear Unity RenderTexture or add a shader conversion path."
+                          << std::endl;
+                source_format_error_logged_ = true;
+            }
+            return false;
+        }
+
         if (sender_thread_running_.load() && active_encode_width_ != 0 && active_encode_height_ != 0 &&
             (desc.Width != active_encode_width_ || desc.Height != active_encode_height_)) {
             std::cerr << "UnitySender_SetTexture attempted to switch to a different size while streaming. "
@@ -695,6 +742,7 @@ private:
         }
 
         D3D11_TEXTURE2D_DESC copied_desc = desc;
+        copied_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         copied_desc.BindFlags = 0;
         copied_desc.MiscFlags = 0;
         copied_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -737,6 +785,9 @@ private:
     ComPtr<ID3D11Texture2D> copied_texture_;
     std::uint32_t source_width_ = 0;
     std::uint32_t source_height_ = 0;
+    DXGI_FORMAT source_format_ = DXGI_FORMAT_UNKNOWN;
+    bool source_format_logged_ = false;
+    bool source_format_error_logged_ = false;
     std::uint64_t render_thread_copy_count_ = 0;
     std::atomic<bool> copied_frame_ready_{false};
     std::uint32_t active_encode_width_ = 0;
