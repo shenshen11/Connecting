@@ -3,6 +3,7 @@
 #include "control_protocol.h"
 #include "packet_defs.h"
 #include "pose_protocol.h"
+#include "video_protocol.h"
 #include "video_sender_core.h"
 
 #include <d3d11.h>
@@ -121,6 +122,9 @@ public:
     std::uint32_t FrameLogInterval() const noexcept override { return 60; }
     std::string StartupDetails() const override;
     std::string FrameLogSuffix() const override;
+    std::uint16_t EncodedFrameFlags() const noexcept override {
+        return vt::proto::VideoFrameFlagVerticalFlip;
+    }
     void BeforeEncodeCopy() override;
     void AfterEncodeCopy() override;
 

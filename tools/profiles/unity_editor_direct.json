@@ -1,0 +1,20 @@
+{
+  "name": "unity_editor_direct",
+  "description": "Unity Editor 直接串流联调，只同步头显运行时配置。",
+  "syncRuntime": {
+    "enabled": true,
+    "poseTargetPort": 25672,
+    "controlTargetPort": 25672,
+    "videoPort": 25673,
+    "encodedVideoPort": 25674,
+    "skipUnityCacheReset": false
+  },
+  "desktopSender": {
+    "enabled": false
+  },
+  "nextSteps": [
+    "打开 Unity Editor，确认场景中的 UnitySenderController 处于预期配置。",
+    "点击 Play，观察 Unity Debug Overlay 与头显画面。",
+    "如果刚换过网络，先重新执行本脚本再测试。"
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "name": "desktop_only",
+  "description": "仅启动桌面视频下行，不依赖 Unity。",
+  "syncRuntime": {
+    "enabled": true,
+    "poseTargetPort": 25672,
+    "controlTargetPort": 25672,
+    "videoPort": 25673,
+    "encodedVideoPort": 25674,
+    "skipUnityCacheReset": true
+  },
+  "desktopSender": {
+    "enabled": true,
+    "executable": "windows-native/build/Debug/desktop_capture_nvenc_sender.exe",
+    "videoPort": 25674,
+    "fps": 10,
+    "bitrate": 4000000,
+    "outputIndex": 0,
+    "width": 1280,
+    "height": 720,
+    "controlPort": 25672,
+    "preferredInterface": "wlan0",
+    "restartIfRunning": true
+  },
+  "nextSteps": [
+    "确认头显应用已经在前台。",
+    "VR 端应直接看到桌面画面。",
+    "如果需要切回 mixed demo，请改用 start_mixed_demo.ps1。"
+  ]
+}

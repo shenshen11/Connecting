@@ -4,7 +4,9 @@ param(
     [string]$AdbPath = 'D:\platform-tools-latest-windows\platform-tools\adb.exe',
     [string]$PackageName = 'com.videotest.nativeapp',
     [string]$ActivityName = 'android.app.NativeActivity',
-    [UInt16]$TargetPort = 25672,
+    [UInt16]$TargetPort = 0,
+    [UInt16]$PoseTargetPort = 0,
+    [UInt16]$ControlTargetPort = 0,
     [UInt16]$VideoPort = 25673,
     [UInt16]$EncodedVideoPort = 25674,
     [string]$UnitySavedEndpointPath = (Join-Path $env:USERPROFILE 'AppData\LocalLow\DefaultCompany\pc-unity-app\VideoTestUnitySender\last_successful_endpoint.json'),
@@ -130,20 +132,29 @@ function Write-HeadsetRuntimeConfig {
     param(
         [string]$TargetHost,
         [UInt16]$PosePort,
+        [UInt16]$ControlPort,
         [UInt16]$RawVideoPort,
         [UInt16]$EncodedPort
     )
 
-    $content = @"
-# Saved after first successful decoded frame
-target_host=$TargetHost
-target_port=$PosePort
-video_port=$RawVideoPort
-encoded_video_port=$EncodedPort
-"@
+    $contentLines = @(
+        '# Saved after first successful decoded frame'
+        "target_host=$TargetHost"
+    )
+
+    if ($PosePort -eq $ControlPort) {
+        $contentLines += "target_port=$PosePort"
+    }
+
+    $contentLines += @(
+        "pose_target_port=$PosePort"
+        "control_target_port=$ControlPort"
+        "video_port=$RawVideoPort"
+        "encoded_video_port=$EncodedPort"
+    )
 
     $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) 'videotest_runtime_config.txt'
-    Set-Content -LiteralPath $tempFile -Value $content
+    Set-Content -LiteralPath $tempFile -Value ($contentLines -join "`n")
 
     $null = Invoke-Adb -Arguments @('push', $tempFile, '/data/local/tmp/videotest_runtime_config.txt') -SuppressOutput
     $null = Invoke-Adb -Arguments @('shell', "run-as $PackageName cp /data/local/tmp/videotest_runtime_config.txt files/last_successful_runtime_config.txt") -SuppressOutput
@@ -155,6 +166,7 @@ function Restart-HeadsetApp {
     param(
         [string]$TargetHost,
         [UInt16]$PosePort,
+        [UInt16]$ControlPort,
         [UInt16]$RawVideoPort,
         [UInt16]$EncodedPort
     )
@@ -169,6 +181,8 @@ function Restart-HeadsetApp {
             "$PackageName/$ActivityName",
             '--es', 'target_host', $TargetHost,
             '--ei', 'target_port', "$PosePort",
+            '--ei', 'pose_target_port', "$PosePort",
+            '--ei', 'control_target_port', "$ControlPort",
             '--ei', 'video_port', "$RawVideoPort",
             '--ei', 'encoded_video_port', "$EncodedPort"
         ) -SuppressOutput
@@ -180,16 +194,44 @@ if (-not (Test-Path -LiteralPath $AdbPath)) {
     $script:ResolvedAdbPath = $AdbPath
 }
 
+$ResolvedPoseTargetPort = if ($PoseTargetPort -ne 0) {
+    $PoseTargetPort
+} elseif ($TargetPort -ne 0) {
+    $TargetPort
+} else {
+    [UInt16]25672
+}
+
+$ResolvedControlTargetPort = if ($ControlTargetPort -ne 0) {
+    $ControlTargetPort
+} elseif ($TargetPort -ne 0) {
+    $TargetPort
+} else {
+    [UInt16]25672
+}
+
 $ResolvedPcIp = Resolve-PcIp -ExplicitIp $PcIp
 Assert-AdbReady
 
 $unityCacheState = Reset-UnitySavedEndpoint -Path $UnitySavedEndpointPath -SkipReset:$SkipUnityCacheReset
-Write-HeadsetRuntimeConfig -TargetHost $ResolvedPcIp -PosePort $TargetPort -RawVideoPort $VideoPort -EncodedPort $EncodedVideoPort
-Restart-HeadsetApp -TargetHost $ResolvedPcIp -PosePort $TargetPort -RawVideoPort $VideoPort -EncodedPort $EncodedVideoPort
+Write-HeadsetRuntimeConfig `
+    -TargetHost $ResolvedPcIp `
+    -PosePort $ResolvedPoseTargetPort `
+    -ControlPort $ResolvedControlTargetPort `
+    -RawVideoPort $VideoPort `
+    -EncodedPort $EncodedVideoPort
+Restart-HeadsetApp `
+    -TargetHost $ResolvedPcIp `
+    -PosePort $ResolvedPoseTargetPort `
+    -ControlPort $ResolvedControlTargetPort `
+    -RawVideoPort $VideoPort `
+    -EncodedPort $EncodedVideoPort
 
 Write-Output "PC IPv4: $ResolvedPcIp"
 Write-Output "adb: $script:ResolvedAdbPath"
 Write-Output "Unity saved endpoint: $unityCacheState ($UnitySavedEndpointPath)"
+Write-Output "Pose target port: $ResolvedPoseTargetPort"
+Write-Output "Control target port: $ResolvedControlTargetPort"
 Write-Output "Headset runtime config:"
 Invoke-Adb @('shell', "run-as $PackageName cat files/last_successful_runtime_config.txt")
 Write-Output 'Headset process:'

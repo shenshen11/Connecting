@@ -1,0 +1,30 @@
+{
+  "name": "mixed_demo",
+  "description": "桌面视频下行 + Unity Editor pose 上行。",
+  "syncRuntime": {
+    "enabled": true,
+    "poseTargetPort": 25672,
+    "controlTargetPort": 25675,
+    "videoPort": 25673,
+    "encodedVideoPort": 25674,
+    "skipUnityCacheReset": false
+  },
+  "desktopSender": {
+    "enabled": true,
+    "executable": "windows-native/build/Debug/desktop_capture_nvenc_sender.exe",
+    "videoPort": 25674,
+    "fps": 10,
+    "bitrate": 4000000,
+    "outputIndex": 0,
+    "width": 1280,
+    "height": 720,
+    "controlPort": 25675,
+    "preferredInterface": "wlan0",
+    "restartIfRunning": true
+  },
+  "nextSteps": [
+    "确认头显应用已经在前台。",
+    "打开 Unity Editor 并点击 Play。",
+    "VR 端应看到桌面画面，同时头显 pose 会驱动 Unity 相机。"
+  ]
+}
