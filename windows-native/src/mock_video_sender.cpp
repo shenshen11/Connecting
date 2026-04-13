@@ -153,6 +153,7 @@ int main(int argc, char** argv) {
             chunk_header.width = config.width;
             chunk_header.height = config.height;
             chunk_header.pixel_format = static_cast<std::uint16_t>(vt::proto::VideoPixelFormat::Rgba8888);
+            chunk_header.stereo = vt::proto::MakeMonoVideoStereoFrameMetadata(frame_id);
             chunk_header.frame_size = frame_size;
             chunk_header.chunk_offset = chunk_offset;
             chunk_header.chunk_size = chunk_size;

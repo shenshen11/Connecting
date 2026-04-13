@@ -31,6 +31,7 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr int kRenderEventCopyTexture = 0;
+constexpr std::size_t kMaxStereoViews = 2;
 
 const char* DxgiFormatName(DXGI_FORMAT format) {
     switch (format) {
@@ -102,13 +103,29 @@ struct LatestPoseState final {
     bool has_pose = false;
 };
 
+struct ViewTextureState final {
+    void* pending_texture_handle = nullptr;
+    void* current_texture_handle = nullptr;
+    ComPtr<ID3D11Texture2D> source_texture;
+    ComPtr<ID3D11Texture2D> copied_texture;
+    std::uint32_t source_width = 0;
+    std::uint32_t source_height = 0;
+    DXGI_FORMAT source_format = DXGI_FORMAT_UNKNOWN;
+    bool source_format_logged = false;
+    bool source_format_error_logged = false;
+};
+
+bool IsValidViewId(int view_id) {
+    return view_id >= 0 && view_id < static_cast<int>(kMaxStereoViews);
+}
+
 class UnitySenderPluginState;
 void UNITY_INTERFACE_API OnGraphicsDeviceEvent(UnityGfxDeviceEventType event_type);
 void UNITY_INTERFACE_API OnRenderEvent(int event_id);
 
 class UnityTextureContentSource final : public vt::windows::IVideoContentSource {
 public:
-    explicit UnityTextureContentSource(UnitySenderPluginState* owner) : owner_(owner) {}
+    UnityTextureContentSource(UnitySenderPluginState* owner, std::uint8_t view_id);
 
     bool Initialize(std::uint16_t* inout_width, std::uint16_t* inout_height) override;
     bool UpdateAndRender(const vt::windows::FrameContext& frame_context,
@@ -118,18 +135,26 @@ public:
     ID3D11Device* device() const noexcept override;
     ID3D11DeviceContext* context() const noexcept override;
     const char* SenderName() const noexcept override { return "unity_sender_plugin"; }
-    const char* FrameLogLabel() const noexcept override { return "unity"; }
+    const char* FrameLogLabel() const noexcept override { return frame_log_label_.c_str(); }
     std::uint32_t FrameLogInterval() const noexcept override { return 60; }
     std::string StartupDetails() const override;
     std::string FrameLogSuffix() const override;
     std::uint16_t EncodedFrameFlags() const noexcept override {
         return vt::proto::VideoFrameFlagVerticalFlip;
     }
+    vt::proto::VideoStereoFrameMetadata EncodedCodecConfigStereoMetadata() const noexcept override;
+    vt::proto::VideoStereoFrameMetadata EncodedFrameStereoMetadata(
+        const vt::windows::FrameContext& frame_context) const noexcept override;
     void BeforeEncodeCopy() override;
     void AfterEncodeCopy() override;
+    void Shutdown() noexcept override;
 
 private:
     UnitySenderPluginState* owner_ = nullptr;
+    std::uint8_t view_id_ = 0;
+    std::string frame_log_label_;
+    std::uint32_t last_acquired_pair_id_ = 0;
+    std::uint64_t last_control_generation_ = 0;
 };
 
 class UnitySenderPluginState final {
@@ -191,18 +216,20 @@ public:
         if (event_type == kUnityGfxDeviceEventShutdown) {
             Stop();
 
-            std::lock_guard<std::mutex> lock(state_mutex_);
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
             renderer_ = kUnityGfxRendererNull;
             unity_context_.Reset();
             unity_multithread_.Reset();
             unity_device_.Reset();
-            source_texture_.Reset();
-            copied_texture_.Reset();
-            pending_texture_handle_ = nullptr;
-            current_texture_handle_ = nullptr;
-            source_width_ = 0;
-            source_height_ = 0;
-            copied_frame_ready_ = false;
+            configured_view_count_ = 0;
+
+            std::lock_guard<std::mutex> texture_lock(texture_mutex_);
+            for (std::size_t view_index = 0; view_index < kMaxStereoViews; ++view_index) {
+                ClearViewTextureStateLocked(view_index);
+            }
+            active_encode_width_ = 0;
+            active_encode_height_ = 0;
+            render_thread_copy_count_ = 0;
             return;
         }
     }
@@ -244,12 +271,27 @@ public:
     }
 
     void SetTextureHandle(void* texture_handle) {
+        SetTextureHandleForView(0, texture_handle);
+    }
+
+    void SetTextureHandleForView(int view_id, void* texture_handle) {
+        if (!IsValidViewId(view_id)) {
+            std::cerr << "UnitySender_SetTextureForView received invalid view id " << view_id << ".\n";
+            return;
+        }
+
         std::lock_guard<std::mutex> lock(texture_mutex_);
-        pending_texture_handle_ = texture_handle;
+        if (texture_handle == nullptr) {
+            ClearViewTextureStateLocked(static_cast<std::size_t>(view_id));
+            return;
+        }
+
+        view_textures_[view_id].pending_texture_handle = texture_handle;
     }
 
     bool Start() {
         bool should_auto_learn_target = false;
+        std::uint8_t configured_view_count = 0;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             if (sender_thread_running_.load() || network_thread_running_.load()) {
@@ -266,9 +308,27 @@ public:
 
         {
             std::lock_guard<std::mutex> texture_lock(texture_mutex_);
-            if (pending_texture_handle_ == nullptr && current_texture_handle_ == nullptr) {
-                std::cerr << "UnitySender_Start failed: no Unity texture handle has been provided.\n";
+            configured_view_count = ComputeConfiguredViewCountLocked();
+            if (configured_view_count == 0) {
+                std::cerr << "UnitySender_Start failed: no Unity texture handles have been provided.\n";
                 return false;
+            }
+
+            if (!EnsureAllActiveSourceTexturesLocked()) {
+                return false;
+            }
+
+            const std::uint32_t expected_width = view_textures_[0].source_width;
+            const std::uint32_t expected_height = view_textures_[0].source_height;
+            for (std::size_t view_index = 1; view_index < configured_view_count; ++view_index) {
+                const auto& view_state = view_textures_[view_index];
+                if (view_state.source_width != expected_width || view_state.source_height != expected_height) {
+                    std::cerr << "UnitySender_Start failed: stereo textures must share one size. view0="
+                              << expected_width << "x" << expected_height
+                              << " view" << view_index << "=" << view_state.source_width << "x"
+                              << view_state.source_height << "\n";
+                    return false;
+                }
             }
         }
 
@@ -284,10 +344,20 @@ public:
             }
 
             stop_requested_.store(false);
-            copied_frame_ready_.store(false);
+            configured_view_count_ = configured_view_count;
+            next_packet_frame_id_.store(0);
             last_pose_ = LatestPoseState{};
             last_pose_sender_ipv4_.clear();
             pending_control_state_ = vt::windows::ControlRequestState{};
+            pending_control_generation_ = 0;
+            last_consumed_control_generation_.fill(0);
+        }
+
+        {
+            std::lock_guard<std::mutex> texture_lock(texture_mutex_);
+            copied_frame_pair_id_ = 0;
+            copied_frame_ready_.store(false);
+            last_consumed_copied_pair_id_.fill(0);
         }
 
         if (!StartNetworkThread()) {
@@ -314,14 +384,19 @@ public:
             sender_config = runtime_config_;
         }
 
-        sender_thread_running_.store(true);
-        sender_thread_ = std::thread([this, sender_config]() {
-            UnityTextureContentSource source(this);
-            vt::windows::SenderRunOptions options{};
-            options.stop_requested = &stop_requested_;
-            vt::windows::RunNvencVideoSender(sender_config, &source, &options);
-            sender_thread_running_.store(false);
-        });
+        for (std::size_t view_index = 0; view_index < configured_view_count; ++view_index) {
+            sender_view_thread_running_[view_index].store(true);
+            sender_threads_[view_index] = std::thread([this, sender_config, view_index]() {
+                UnityTextureContentSource source(this, static_cast<std::uint8_t>(view_index));
+                vt::windows::SenderRunOptions options{};
+                options.stop_requested = &stop_requested_;
+                options.shared_packet_frame_id = &next_packet_frame_id_;
+                vt::windows::RunNvencVideoSender(sender_config, &source, &options);
+                sender_view_thread_running_[view_index].store(false);
+                UpdateSenderThreadRunningFlag();
+            });
+        }
+        UpdateSenderThreadRunningFlag();
 
         return true;
     }
@@ -329,8 +404,13 @@ public:
     void Stop() {
         stop_requested_.store(true);
 
-        if (sender_thread_.joinable()) {
-            sender_thread_.join();
+        for (auto& sender_thread : sender_threads_) {
+            if (sender_thread.joinable()) {
+                sender_thread.join();
+            }
+        }
+        for (auto& sender_running : sender_view_thread_running_) {
+            sender_running.store(false);
         }
         sender_thread_running_.store(false);
 
@@ -347,6 +427,22 @@ public:
         if (winsock_started_) {
             WSACleanup();
             winsock_started_ = false;
+        }
+        configured_view_count_ = 0;
+        pending_control_state_ = vt::windows::ControlRequestState{};
+        pending_control_generation_ = 0;
+        last_consumed_control_generation_.fill(0);
+        last_pose_sender_ipv4_.clear();
+        pose_socket_ = INVALID_SOCKET;
+        UpdateSenderThreadRunningFlag();
+        {
+            std::lock_guard<std::mutex> texture_lock(texture_mutex_);
+            active_encode_width_ = 0;
+            active_encode_height_ = 0;
+            copied_frame_pair_id_ = 0;
+            copied_frame_ready_.store(false);
+            last_consumed_copied_pair_id_.fill(0);
+            render_thread_copy_count_ = 0;
         }
     }
 
@@ -385,16 +481,26 @@ public:
         std::lock_guard<std::mutex> texture_lock(texture_mutex_);
 
         out_stats->unity_device_ready = unity_device_ != nullptr ? 1 : 0;
-        out_stats->source_texture_ready = source_texture_ != nullptr ? 1 : 0;
+        int source_texture_ready = configured_view_count_ > 0 ? 1 : 0;
+        for (std::size_t view_index = 0; view_index < configured_view_count_; ++view_index) {
+            if (view_textures_[view_index].source_texture == nullptr ||
+                view_textures_[view_index].copied_texture == nullptr) {
+                source_texture_ready = 0;
+                break;
+            }
+        }
+        out_stats->source_texture_ready = source_texture_ready;
         out_stats->copied_frame_ready = copied_frame_ready_.load() ? 1 : 0;
         out_stats->network_thread_running = network_thread_running_.load() ? 1 : 0;
         out_stats->sender_thread_running = sender_thread_running_.load() ? 1 : 0;
-        out_stats->source_width = source_width_;
-        out_stats->source_height = source_height_;
+        out_stats->source_width = view_textures_[0].source_width;
+        out_stats->source_height = view_textures_[0].source_height;
         out_stats->render_thread_copy_count = render_thread_copy_count_;
         out_stats->pose_packets_received = last_pose_.packets_received;
         out_stats->control_packets_received = pending_control_state_.packets_received;
         out_stats->last_pose_sequence = last_pose_.sequence;
+        out_stats->configured_view_count = configured_view_count_;
+        out_stats->latest_frame_pair_id = static_cast<std::uint32_t>(copied_frame_pair_id_);
         return true;
     }
 
@@ -421,15 +527,28 @@ public:
         }
 
         std::lock_guard<std::mutex> lock(texture_mutex_);
-        if (!EnsureSourceTexturesLocked()) {
+        const auto configured_view_count = ComputeConfiguredViewCountLocked();
+        if (configured_view_count == 0 || !EnsureAllActiveSourceTexturesLocked()) {
             return;
         }
-        if (unity_context_ == nullptr || source_texture_ == nullptr || copied_texture_ == nullptr) {
+        if (unity_context_ == nullptr) {
+            return;
+        }
+        if (copied_frame_pair_id_ != 0 &&
+            !HaveAllActiveViewsConsumedCopiedPairLocked(copied_frame_pair_id_, configured_view_count)) {
             return;
         }
 
         ImmediateContextGuard context_guard(unity_multithread_.Get());
-        unity_context_->CopyResource(copied_texture_.Get(), source_texture_.Get());
+        for (std::size_t view_index = 0; view_index < configured_view_count; ++view_index) {
+            if (view_textures_[view_index].source_texture == nullptr ||
+                view_textures_[view_index].copied_texture == nullptr) {
+                return;
+            }
+            unity_context_->CopyResource(view_textures_[view_index].copied_texture.Get(),
+                                         view_textures_[view_index].source_texture.Get());
+        }
+        copied_frame_pair_id_ += 1;
         copied_frame_ready_.store(true);
         render_thread_copy_count_ += 1;
     }
@@ -438,13 +557,16 @@ public:
         return reserved_event_base_ >= 0 ? reserved_event_base_ + kRenderEventCopyTexture : -1;
     }
 
-    bool PrepareForSenderInitialize(std::uint16_t* inout_width, std::uint16_t* inout_height) {
+    bool PrepareForSenderInitialize(std::uint8_t view_id,
+                                    std::uint16_t* inout_width,
+                                    std::uint16_t* inout_height) {
         std::lock_guard<std::mutex> lock(texture_mutex_);
-        if (!EnsureSourceTexturesLocked()) {
+        if (view_id >= kMaxStereoViews || !EnsureAllActiveSourceTexturesLocked()) {
             return false;
         }
 
-        if (source_width_ == 0 || source_height_ == 0) {
+        const auto& view_state = view_textures_[view_id];
+        if (view_state.source_width == 0 || view_state.source_height == 0) {
             std::cerr << "Unity sender source texture dimensions are unavailable.\n";
             return false;
         }
@@ -454,16 +576,27 @@ public:
         }
 
         if (*inout_width == 0) {
-            *inout_width = static_cast<std::uint16_t>(source_width_);
+            *inout_width = static_cast<std::uint16_t>(view_state.source_width);
         }
         if (*inout_height == 0) {
-            *inout_height = static_cast<std::uint16_t>(source_height_);
+            *inout_height = static_cast<std::uint16_t>(view_state.source_height);
         }
 
-        if (*inout_width != source_width_ || *inout_height != source_height_) {
+        if (*inout_width != view_state.source_width || *inout_height != view_state.source_height) {
             std::cerr << "Unity sender currently requires encode size to match the Unity RenderTexture size. "
                       << "encode=" << *inout_width << "x" << *inout_height
-                      << " source=" << source_width_ << "x" << source_height_
+                      << " source=" << view_state.source_width << "x" << view_state.source_height
+                      << "\n";
+            return false;
+        }
+
+        if (active_encode_width_ == 0 && active_encode_height_ == 0) {
+            active_encode_width_ = *inout_width;
+            active_encode_height_ = *inout_height;
+        } else if (active_encode_width_ != *inout_width || active_encode_height_ != *inout_height) {
+            std::cerr << "Unity sender active encode size mismatch across views. active="
+                      << active_encode_width_ << "x" << active_encode_height_
+                      << " requested=" << *inout_width << "x" << *inout_height
                       << "\n";
             return false;
         }
@@ -471,8 +604,10 @@ public:
         return true;
     }
 
-    bool AcquireCopiedTexture(ID3D11Texture2D** out_texture) {
-        if (out_texture == nullptr) {
+    bool AcquireCopiedTexture(std::uint8_t view_id,
+                              std::uint32_t* inout_last_pair_id,
+                              ID3D11Texture2D** out_texture) {
+        if (out_texture == nullptr || inout_last_pair_id == nullptr) {
             return false;
         }
 
@@ -482,12 +617,21 @@ public:
         }
 
         std::lock_guard<std::mutex> lock(texture_mutex_);
-        if (copied_texture_ == nullptr) {
+        if (view_id >= kMaxStereoViews) {
             *out_texture = nullptr;
             return false;
         }
 
-        *out_texture = copied_texture_.Get();
+        const auto& view_state = view_textures_[view_id];
+        if (view_state.copied_texture == nullptr || copied_frame_pair_id_ == 0 ||
+            copied_frame_pair_id_ == *inout_last_pair_id) {
+            *out_texture = nullptr;
+            return false;
+        }
+
+        *out_texture = view_state.copied_texture.Get();
+        *inout_last_pair_id = static_cast<std::uint32_t>(copied_frame_pair_id_);
+        last_consumed_copied_pair_id_[view_id] = copied_frame_pair_id_;
         return true;
     }
 
@@ -518,39 +662,70 @@ public:
         return "source=unity_render_texture pose_port=" + std::to_string(pose_port_);
     }
 
-    std::string FrameLogSuffix() const {
+    std::string StartupDetails(std::uint8_t view_id) const {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        return "pose_packets=" + std::to_string(last_pose_.packets_received) +
+        return "view=" + std::to_string(view_id) + "/" + std::to_string(std::max<int>(configured_view_count_, 1)) +
+               " source=unity_render_texture pose_port=" + std::to_string(pose_port_);
+    }
+
+    std::string FrameLogSuffix(std::uint8_t view_id) const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return "view=" + std::to_string(view_id) +
+               " pose_packets=" + std::to_string(last_pose_.packets_received) +
                (last_pose_.has_pose ? " pose=active" : " pose=default");
     }
 
-    bool ConsumePendingControl(vt::windows::ControlRequestState* control_state) {
-        if (control_state == nullptr) {
+    bool ConsumePendingControl(std::uint8_t view_id,
+                               std::uint64_t* inout_generation,
+                               vt::windows::ControlRequestState* control_state) {
+        if (control_state == nullptr || inout_generation == nullptr || view_id >= kMaxStereoViews) {
             return false;
         }
 
         std::lock_guard<std::mutex> lock(state_mutex_);
-        control_state->request_keyframe = control_state->request_keyframe || pending_control_state_.request_keyframe;
+        if (pending_control_generation_ == 0 || *inout_generation == pending_control_generation_) {
+            return true;
+        }
+
+        control_state->request_keyframe =
+            control_state->request_keyframe || pending_control_state_.request_keyframe;
         control_state->request_codec_config =
             control_state->request_codec_config || pending_control_state_.request_codec_config;
         if (pending_control_state_.request_keyframe || pending_control_state_.request_codec_config) {
             control_state->last_related_frame_id = pending_control_state_.last_related_frame_id;
         }
-        pending_control_state_.request_keyframe = false;
-        pending_control_state_.request_codec_config = false;
+        *inout_generation = pending_control_generation_;
+        last_consumed_control_generation_[view_id] = pending_control_generation_;
+        if (HaveAllActiveViewsConsumedControlLocked(pending_control_generation_)) {
+            pending_control_state_.request_keyframe = false;
+            pending_control_state_.request_codec_config = false;
+        }
         return true;
     }
 
-    void SetActiveEncodeSize(std::uint32_t width, std::uint32_t height) {
-        std::lock_guard<std::mutex> lock(texture_mutex_);
-        active_encode_width_ = width;
-        active_encode_height_ = height;
+    std::uint8_t configured_view_count() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return configured_view_count_;
     }
 
-    void ResetActiveEncodeSize() {
-        std::lock_guard<std::mutex> lock(texture_mutex_);
-        active_encode_width_ = 0;
-        active_encode_height_ = 0;
+    vt::proto::VideoStereoFrameMetadata MakeStereoMetadata(std::uint8_t view_id,
+                                                           std::uint32_t frame_pair_id) const noexcept {
+        std::uint8_t configured_view_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            configured_view_count = configured_view_count_;
+        }
+
+        if (configured_view_count <= 1) {
+            return vt::proto::MakeMonoVideoStereoFrameMetadata(frame_pair_id);
+        }
+
+        vt::proto::VideoStereoFrameMetadata metadata{};
+        metadata.view_id = view_id < configured_view_count ? view_id : 0;
+        metadata.view_count = configured_view_count;
+        metadata.layout = static_cast<std::uint16_t>(vt::proto::VideoStereoLayout::ProjectionViews);
+        metadata.frame_pair_id = frame_pair_id;
+        return metadata;
     }
 
 private:
@@ -651,6 +826,9 @@ private:
             std::memcpy(&payload, data + sizeof(header), sizeof(payload));
             std::lock_guard<std::mutex> lock(state_mutex_);
             vt::windows::HandleControlPayload(payload, &pending_control_state_);
+            if (pending_control_state_.request_keyframe || pending_control_state_.request_codec_config) {
+                pending_control_generation_ += 1;
+            }
             UpdateLastPoseSenderIpv4Locked(from);
             return;
         }
@@ -684,13 +862,62 @@ private:
         }
     }
 
-    bool EnsureSourceTexturesLocked() {
-        void* texture_handle = pending_texture_handle_ != nullptr ? pending_texture_handle_ : current_texture_handle_;
+    std::uint8_t ComputeConfiguredViewCountLocked() const {
+        const bool has_view_0 =
+            view_textures_[0].pending_texture_handle != nullptr || view_textures_[0].current_texture_handle != nullptr;
+        const bool has_view_1 =
+            view_textures_[1].pending_texture_handle != nullptr || view_textures_[1].current_texture_handle != nullptr;
+        if (!has_view_0) {
+            return 0;
+        }
+        return has_view_1 ? 2 : 1;
+    }
+
+    bool EnsureAllActiveSourceTexturesLocked() {
+        const auto configured_view_count = ComputeConfiguredViewCountLocked();
+        if (configured_view_count == 0) {
+            return false;
+        }
+
+        std::uint32_t expected_width = 0;
+        std::uint32_t expected_height = 0;
+        for (std::size_t view_index = 0; view_index < configured_view_count; ++view_index) {
+            if (!EnsureSourceTextureLocked(view_index)) {
+                return false;
+            }
+
+            const auto& view_state = view_textures_[view_index];
+            if (view_state.source_width == 0 || view_state.source_height == 0) {
+                return false;
+            }
+
+            if (expected_width == 0 && expected_height == 0) {
+                expected_width = view_state.source_width;
+                expected_height = view_state.source_height;
+                continue;
+            }
+
+            if (view_state.source_width != expected_width || view_state.source_height != expected_height) {
+                std::cerr << "Unity sender stereo view size mismatch. view0=" << expected_width << "x"
+                          << expected_height << " view" << view_index << "=" << view_state.source_width << "x"
+                          << view_state.source_height << "\n";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool EnsureSourceTextureLocked(std::size_t view_index) {
+        auto& view_state = view_textures_[view_index];
+        void* texture_handle =
+            view_state.pending_texture_handle != nullptr ? view_state.pending_texture_handle : view_state.current_texture_handle;
         if (texture_handle == nullptr) {
             return false;
         }
 
-        if (texture_handle == current_texture_handle_ && source_texture_ != nullptr && copied_texture_ != nullptr) {
+        if (texture_handle == view_state.current_texture_handle && view_state.source_texture != nullptr &&
+            view_state.copied_texture != nullptr) {
             return true;
         }
 
@@ -711,11 +938,11 @@ private:
             return false;
         }
 
-        const bool should_log_format = !source_format_logged_ || source_format_ != desc.Format;
-        source_format_ = desc.Format;
-        source_format_logged_ = true;
+        const bool should_log_format = !view_state.source_format_logged || view_state.source_format != desc.Format;
+        view_state.source_format = desc.Format;
+        view_state.source_format_logged = true;
         if (should_log_format) {
-            std::cout << "unity_sender_plugin source texture format="
+            std::cout << "unity_sender_plugin source texture format view=" << view_index << " "
                       << DxgiFormatName(desc.Format)
                       << " (" << static_cast<unsigned>(desc.Format) << ")"
                       << " size=" << desc.Width << "x" << desc.Height
@@ -723,14 +950,15 @@ private:
         }
 
         if (!IsNvencArgbCopyCompatibleFormat(desc.Format)) {
-            if (!source_format_error_logged_) {
+            if (!view_state.source_format_error_logged) {
                 std::cerr << "Unity sender source texture format is not compatible with the current NVENC ARGB path. "
+                          << "view=" << view_index << " "
                           << "source=" << DxgiFormatName(desc.Format)
                           << " (" << static_cast<unsigned>(desc.Format) << ")"
                           << " required=DXGI_FORMAT_B8G8R8A8_UNORM. "
                           << "Use a BGRA32 Linear Unity RenderTexture or add a shader conversion path."
                           << std::endl;
-                source_format_error_logged_ = true;
+                view_state.source_format_error_logged = true;
             }
             return false;
         }
@@ -760,14 +988,58 @@ private:
             return false;
         }
 
-        source_texture_ = texture;
-        copied_texture_ = copied_texture;
-        current_texture_handle_ = texture_handle;
-        pending_texture_handle_ = nullptr;
-        source_width_ = desc.Width;
-        source_height_ = desc.Height;
+        view_state.source_texture = texture;
+        view_state.copied_texture = copied_texture;
+        view_state.current_texture_handle = texture_handle;
+        view_state.pending_texture_handle = nullptr;
+        view_state.source_width = desc.Width;
+        view_state.source_height = desc.Height;
         copied_frame_ready_.store(false);
         return true;
+    }
+
+    bool HaveAllActiveViewsConsumedControlLocked(std::uint64_t generation) const {
+        if (configured_view_count_ == 0) {
+            return true;
+        }
+
+        for (std::size_t view_index = 0; view_index < configured_view_count_; ++view_index) {
+            if (last_consumed_control_generation_[view_index] < generation) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool HaveAllActiveViewsConsumedCopiedPairLocked(std::uint64_t pair_id, std::uint8_t active_view_count) const {
+        if (pair_id == 0 || active_view_count == 0) {
+            return true;
+        }
+
+        for (std::size_t view_index = 0; view_index < active_view_count; ++view_index) {
+            if (last_consumed_copied_pair_id_[view_index] < pair_id) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void UpdateSenderThreadRunningFlag() {
+        bool any_running = false;
+        for (const auto& sender_running : sender_view_thread_running_) {
+            if (sender_running.load()) {
+                any_running = true;
+                break;
+            }
+        }
+        sender_thread_running_.store(any_running);
+    }
+
+    void ClearViewTextureStateLocked(std::size_t view_index) {
+        view_textures_[view_index] = ViewTextureState{};
+        copied_frame_ready_.store(false);
+        copied_frame_pair_id_ = 0;
+        last_consumed_copied_pair_id_.fill(0);
     }
 
     mutable std::mutex state_mutex_;
@@ -783,34 +1055,33 @@ private:
     ComPtr<ID3D11DeviceContext> unity_context_;
     ComPtr<ID3D11Multithread> unity_multithread_;
 
-    void* pending_texture_handle_ = nullptr;
-    void* current_texture_handle_ = nullptr;
-    ComPtr<ID3D11Texture2D> source_texture_;
-    ComPtr<ID3D11Texture2D> copied_texture_;
-    std::uint32_t source_width_ = 0;
-    std::uint32_t source_height_ = 0;
-    DXGI_FORMAT source_format_ = DXGI_FORMAT_UNKNOWN;
-    bool source_format_logged_ = false;
-    bool source_format_error_logged_ = false;
+    std::array<ViewTextureState, kMaxStereoViews> view_textures_{};
     std::uint64_t render_thread_copy_count_ = 0;
     std::atomic<bool> copied_frame_ready_{false};
+    std::uint64_t copied_frame_pair_id_ = 0;
     std::uint32_t active_encode_width_ = 0;
     std::uint32_t active_encode_height_ = 0;
 
     vt::windows::SenderRuntimeConfig runtime_config_{};
     std::uint16_t pose_port_ = 25672;
+    std::uint8_t configured_view_count_ = 0;
 
     LatestPoseState last_pose_{};
     std::string last_pose_sender_ipv4_{};
     vt::windows::ControlRequestState pending_control_state_{};
+    std::uint64_t pending_control_generation_ = 0;
+    std::array<std::uint64_t, kMaxStereoViews> last_consumed_control_generation_{};
+    std::array<std::uint64_t, kMaxStereoViews> last_consumed_copied_pair_id_{};
 
     SOCKET pose_socket_ = INVALID_SOCKET;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> network_running_{false};
     std::atomic<bool> network_thread_running_{false};
     std::atomic<bool> sender_thread_running_{false};
+    std::array<std::atomic<bool>, kMaxStereoViews> sender_view_thread_running_{};
+    std::atomic<std::uint32_t> next_packet_frame_id_{0};
     std::thread network_thread_;
-    std::thread sender_thread_;
+    std::array<std::thread, kMaxStereoViews> sender_threads_{};
     bool winsock_started_ = false;
 };
 
@@ -827,23 +1098,31 @@ void UNITY_INTERFACE_API OnRenderEvent(int event_id) {
     GetPluginState().OnRenderEvent(event_id);
 }
 
+UnityTextureContentSource::UnityTextureContentSource(UnitySenderPluginState* owner, std::uint8_t view_id)
+    : owner_(owner),
+      view_id_(view_id),
+      frame_log_label_("unity_view" + std::to_string(view_id)) {}
+
 bool UnityTextureContentSource::Initialize(std::uint16_t* inout_width, std::uint16_t* inout_height) {
-    if (owner_ == nullptr || !owner_->PrepareForSenderInitialize(inout_width, inout_height)) {
-        return false;
-    }
-    owner_->SetActiveEncodeSize(*inout_width, *inout_height);
-    return true;
+    return owner_ != nullptr && owner_->PrepareForSenderInitialize(view_id_, inout_width, inout_height);
 }
 
-bool UnityTextureContentSource::UpdateAndRender(const vt::windows::FrameContext&,
+bool UnityTextureContentSource::UpdateAndRender(const vt::windows::FrameContext& frame_context,
                                                 vt::windows::ControlRequestState* control_state,
                                                 ID3D11Texture2D** out_texture) {
     if (owner_ == nullptr || out_texture == nullptr) {
         return false;
     }
 
-    owner_->ConsumePendingControl(control_state);
-    return owner_->AcquireCopiedTexture(out_texture);
+    owner_->ConsumePendingControl(view_id_, &last_control_generation_, control_state);
+    if (!owner_->AcquireCopiedTexture(view_id_, &last_acquired_pair_id_, out_texture)) {
+        return false;
+    }
+
+    if (frame_context.frame_index <= 3) {
+        frame_log_label_ = "unity_view" + std::to_string(view_id_);
+    }
+    return *out_texture != nullptr;
 }
 
 ID3D11Device* UnityTextureContentSource::device() const noexcept {
@@ -855,11 +1134,21 @@ ID3D11DeviceContext* UnityTextureContentSource::context() const noexcept {
 }
 
 std::string UnityTextureContentSource::StartupDetails() const {
-    return owner_ != nullptr ? owner_->StartupDetails() : std::string{};
+    return owner_ != nullptr ? owner_->StartupDetails(view_id_) : std::string{};
 }
 
 std::string UnityTextureContentSource::FrameLogSuffix() const {
-    return owner_ != nullptr ? owner_->FrameLogSuffix() : std::string{};
+    return owner_ != nullptr ? owner_->FrameLogSuffix(view_id_) : std::string{};
+}
+
+vt::proto::VideoStereoFrameMetadata UnityTextureContentSource::EncodedCodecConfigStereoMetadata() const noexcept {
+    return owner_ != nullptr ? owner_->MakeStereoMetadata(view_id_, 0) : vt::proto::MakeMonoVideoStereoFrameMetadata();
+}
+
+vt::proto::VideoStereoFrameMetadata UnityTextureContentSource::EncodedFrameStereoMetadata(
+    const vt::windows::FrameContext&) const noexcept {
+    return owner_ != nullptr ? owner_->MakeStereoMetadata(view_id_, last_acquired_pair_id_)
+                             : vt::proto::MakeMonoVideoStereoFrameMetadata();
 }
 
 void UnityTextureContentSource::BeforeEncodeCopy() {
@@ -873,6 +1162,8 @@ void UnityTextureContentSource::AfterEncodeCopy() {
         owner_->AfterEncodeCopy();
     }
 }
+
+void UnityTextureContentSource::Shutdown() noexcept {}
 
 }  // namespace
 
@@ -903,6 +1194,10 @@ bool UnitySender_Configure(const char* target_host,
 
 void UnitySender_SetTexture(void* texture_handle) {
     GetPluginState().SetTextureHandle(texture_handle);
+}
+
+void UnitySender_SetTextureForView(int view_id, void* texture_handle) {
+    GetPluginState().SetTextureHandleForView(view_id, texture_handle);
 }
 
 bool UnitySender_Start() {

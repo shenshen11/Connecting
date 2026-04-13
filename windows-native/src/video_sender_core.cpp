@@ -27,6 +27,7 @@ void SendEncodedFrame(SOCKET sock,
                       std::uint16_t width,
                       std::uint16_t height,
                       std::uint16_t flags,
+                      const vt::proto::VideoStereoFrameMetadata& stereo,
                       const std::vector<std::uint8_t>& payload) {
     const std::uint32_t frame_size = static_cast<std::uint32_t>(payload.size());
     const std::uint16_t chunk_count =
@@ -52,6 +53,7 @@ void SendEncodedFrame(SOCKET sock,
         encoded_header.height = height;
         encoded_header.codec = static_cast<std::uint16_t>(vt::proto::VideoCodec::H264AnnexB);
         encoded_header.flags = flags;
+        encoded_header.stereo = stereo;
         encoded_header.frame_size = frame_size;
         encoded_header.chunk_offset = chunk_offset;
         encoded_header.chunk_size = chunk_size;
@@ -257,7 +259,13 @@ int RunNvencVideoSender(const SenderRuntimeConfig& requested_config,
         encoder.CreateEncoder(&init_params);
 
         std::vector<std::uint8_t> sequence_params;
-        std::uint32_t packet_frame_id = 0;
+        std::uint32_t local_packet_frame_id = 0;
+        auto allocate_packet_frame_id = [&]() -> std::uint32_t {
+            if (options != nullptr && options->shared_packet_frame_id != nullptr) {
+                return options->shared_packet_frame_id->fetch_add(1, std::memory_order_relaxed) + 1;
+            }
+            return ++local_packet_frame_id;
+        };
         const std::uint16_t source_frame_flags = source->EncodedFrameFlags();
         auto send_codec_config = [&](const char* reason) {
             sequence_params.clear();
@@ -266,18 +274,23 @@ int RunNvencVideoSender(const SenderRuntimeConfig& requested_config,
                 return;
             }
 
-            ++packet_frame_id;
+            const std::uint32_t packet_frame_id = allocate_packet_frame_id();
+            const vt::proto::VideoStereoFrameMetadata stereo = source->EncodedCodecConfigStereoMetadata();
             SendEncodedFrame(video_socket,
                              target,
                              packet_frame_id,
                              config.width,
                              config.height,
                              static_cast<std::uint16_t>(
-                                 vt::proto::VideoFrameFlagCodecConfig |
-                                 vt::proto::VideoFrameFlagKeyframe |
-                                 source_frame_flags),
+                                  vt::proto::VideoFrameFlagCodecConfig |
+                                  vt::proto::VideoFrameFlagKeyframe |
+                                  source_frame_flags),
+                             stereo,
                              sequence_params);
             std::cout << "sent codec config packet_id=" << packet_frame_id
+                      << " pair=" << stereo.frame_pair_id
+                      << " view=" << static_cast<unsigned>(stereo.view_id)
+                      << "/" << static_cast<unsigned>(stereo.view_count)
                       << " bytes=" << sequence_params.size()
                       << " reason=" << reason
                       << std::endl;
@@ -359,23 +372,26 @@ int RunNvencVideoSender(const SenderRuntimeConfig& requested_config,
                 const std::uint16_t flags = static_cast<std::uint16_t>(
                     (force_idr ? vt::proto::VideoFrameFlagKeyframe : vt::proto::VideoFrameFlagNone) |
                     source_frame_flags);
-                ++packet_frame_id;
+                const std::uint32_t packet_frame_id = allocate_packet_frame_id();
+                const vt::proto::VideoStereoFrameMetadata stereo = source->EncodedFrameStereoMetadata(frame_context);
                 SendEncodedFrame(
-                    video_socket, target, packet_frame_id, config.width, config.height, flags, access_unit);
+                    video_socket, target, packet_frame_id, config.width, config.height, flags, stereo, access_unit);
                 has_sent_video_access_unit = true;
-            }
-
-            if (frame_index <= 5 || (frame_index % std::max(source->FrameLogInterval(), 1u)) == 0 || force_idr) {
-                std::cout << "sent " << source->FrameLogLabel()
-                          << " frame=" << frame_index
-                          << " packet_id=" << packet_frame_id
-                          << " bytes=" << access_unit.size()
-                          << " keyframe=" << (force_idr ? "yes" : "no");
-                const std::string suffix = source->FrameLogSuffix();
-                if (!suffix.empty()) {
-                    std::cout << " " << suffix;
+                if (frame_index <= 5 || (frame_index % std::max(source->FrameLogInterval(), 1u)) == 0 || force_idr) {
+                    std::cout << "sent " << source->FrameLogLabel()
+                              << " frame=" << frame_index
+                              << " packet_id=" << packet_frame_id
+                              << " pair=" << stereo.frame_pair_id
+                              << " view=" << static_cast<unsigned>(stereo.view_id)
+                              << "/" << static_cast<unsigned>(stereo.view_count)
+                              << " bytes=" << access_unit.size()
+                              << " keyframe=" << (force_idr ? "yes" : "no");
+                    const std::string suffix = source->FrameLogSuffix();
+                    if (!suffix.empty()) {
+                        std::cout << " " << suffix;
+                    }
+                    std::cout << std::endl;
                 }
-                std::cout << std::endl;
             }
 
             ++frame_index;

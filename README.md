@@ -9,6 +9,8 @@
 - Windows 桌面抓取与 D3D11 直接渲染样例已跑通。
 - Unity 已接入为渲染内容源。
 - **当前推荐开发路径**：优先在 `Unity Editor Play` 模式下完成双向链路调试，再回到 `Unity.exe` 打包验证。
+- 已新增可切换的沉浸式显示模式：`quad_mono`、`projection_mono`、`projection_stereo`。
+- `projection_mono` 已验证可见，`projection_stereo` 已接通 Unity 双眼纹理、Windows 双 sender、Android 双 decoder 与 OpenXR `XrCompositionLayerProjection` 骨架。
 - 目前已验证：
   - Unity Editor 渲染画面可发送到 VR 端。
   - VR 端 pose 可实时回传到 Unity。
@@ -25,6 +27,29 @@
   - Unity 负责内容渲染
   - 原生插件负责纹理采集、编码和发送
   - 原生接收器负责接收 pose 并回传给 Unity
+- 显示层路线：`XrCompositionLayerQuad` -> `GL-backed XrCompositionLayerProjection` -> true stereo projection
+
+## 更沉浸的视频显示路线
+
+- `quad_mono`
+  - 旧路径：单路视频贴到 OpenXR quad layer，表现为“前方大屏”。
+- `projection_mono`
+  - 过渡路径：仍是单路解码，但改为通过 `XrCompositionLayerProjection` 提交，先验证 projection 显示链路。
+- `projection_stereo`
+  - 当前主线：Unity 输出左右眼两张 `RenderTexture`，Windows 原生插件分别编码发送，Android 按 `view_id` 路由到左右 decoder，再把左右眼 swapchain 提交给 OpenXR compositor。
+
+当前推荐的联调入口：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\videotest\tools\start_unity_editor_projection_mono.ps1
+powershell -ExecutionPolicy Bypass -File D:\videotest\tools\start_unity_editor_projection_stereo.ps1
+```
+
+如果只是同步当前网络环境与头显运行时配置，也可以继续使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\videotest\tools\sync_editor_runtime.ps1
+```
 
 ## Unity Editor 联调建议流程
 
@@ -103,6 +128,9 @@ powershell -ExecutionPolicy Bypass -File D:\videotest\tools\sync_editor_runtime.
 - `unity_editor_playmode_debug_recap_zh.md`：本次 Unity Editor Play 双向链路问题的完整排查复盘
 - `pico4_ultra_device_bringup_zh.md`：设备与真机联调说明
 - `development_journal_zh.md`：开发过程记录
+- `immersive_video_display_plan_zh.md`：更沉浸的视频显示方案阶段计划
+- `immersive_projection_pathfinding_log_zh.md`：从 quad 过渡到 projection / stereo projection 的探索与问题留痕
+- `startup_profiles_guide_zh.md`：当前启动 profile、参数转发与推荐用法
 
 ## 当前状态
 
@@ -111,3 +139,4 @@ powershell -ExecutionPolicy Bypass -File D:\videotest\tools\sync_editor_runtime.
 - 提升 Editor Play 模式稳定性；
 - 降低换网后旧缓存地址导致的联调失败概率；
 - 持续完善 Unity -> VR 视频链路与 VR -> Unity pose 链路的诊断能力。
+- 在 `projection_stereo` 路线上继续推进双眼同步、性能与网络鲁棒性优化。

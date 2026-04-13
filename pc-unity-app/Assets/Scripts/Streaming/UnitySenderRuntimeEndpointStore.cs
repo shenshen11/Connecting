@@ -12,6 +12,7 @@ namespace VideoTest.UnityIntegration
             public string targetHost = "127.0.0.1";
             public int videoPort = 25674;
             public int posePort = 25672;
+            public string captureViewMode = "mono";
         }
 
         internal struct SavedEndpoint
@@ -19,6 +20,7 @@ namespace VideoTest.UnityIntegration
             public string targetHost;
             public int videoPort;
             public int posePort;
+            public string captureViewMode;
         }
 
         public static string GetConfigPath()
@@ -47,6 +49,9 @@ namespace VideoTest.UnityIntegration
                 endpoint.targetHost = record.targetHost.Trim();
                 endpoint.videoPort = record.videoPort;
                 endpoint.posePort = record.posePort;
+                endpoint.captureViewMode = string.IsNullOrWhiteSpace(record.captureViewMode)
+                    ? "mono"
+                    : record.captureViewMode.Trim();
                 return true;
             }
             catch (Exception ex)
@@ -56,7 +61,7 @@ namespace VideoTest.UnityIntegration
             }
         }
 
-        public static bool SaveSavedEndpoint(string targetHost, int videoPort, int posePort)
+        public static bool SaveSavedEndpoint(string targetHost, int videoPort, int posePort, string captureViewMode = "mono")
         {
             if (string.IsNullOrWhiteSpace(targetHost))
             {
@@ -77,7 +82,8 @@ namespace VideoTest.UnityIntegration
                 {
                     targetHost = targetHost.Trim(),
                     videoPort = videoPort,
-                    posePort = posePort
+                    posePort = posePort,
+                    captureViewMode = string.IsNullOrWhiteSpace(captureViewMode) ? "mono" : captureViewMode.Trim()
                 };
                 var json = JsonUtility.ToJson(record, true);
                 File.WriteAllText(path, json);

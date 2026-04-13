@@ -11,6 +11,7 @@ namespace VideoTest.UnityIntegration
         public int? encodeHeight;
         public int? fps;
         public int? bitrate;
+        public string captureViewMode;
         public bool disableAutoStart;
         public bool ignoreSavedEndpoint;
         public bool resetSavedEndpoint;
@@ -23,6 +24,7 @@ namespace VideoTest.UnityIntegration
             encodeHeight.HasValue ||
             fps.HasValue ||
             bitrate.HasValue ||
+            !string.IsNullOrWhiteSpace(captureViewMode) ||
             disableAutoStart;
 
         public static UnitySenderLaunchOptions Parse(string[] args)
@@ -90,6 +92,14 @@ namespace VideoTest.UnityIntegration
                         if (TryReadNextInt(args, ref i, out var bitrate))
                         {
                             options.bitrate = bitrate;
+                        }
+                        break;
+
+                    case "-vt-capture-mode":
+                    case "--vt-capture-mode":
+                        if (TryReadNextValue(args, ref i, out var captureViewMode))
+                        {
+                            options.captureViewMode = captureViewMode;
                         }
                         break;
 

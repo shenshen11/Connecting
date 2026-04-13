@@ -1,0 +1,21 @@
+{
+  "name": "unity_editor_projection_mono",
+  "description": "Unity Editor 直接串流联调，头显使用 projection_mono 更沉浸地显示视频。",
+  "syncRuntime": {
+    "enabled": true,
+    "displayMode": "projection_mono",
+    "poseTargetPort": 25672,
+    "controlTargetPort": 25672,
+    "videoPort": 25673,
+    "encodedVideoPort": 25674,
+    "skipUnityCacheReset": false
+  },
+  "desktopSender": {
+    "enabled": false
+  },
+  "nextSteps": [
+    "打开 Unity Editor，确认场景中的 UnitySenderController 配置正常。",
+    "点击 Play，头显将优先以 projection_mono 方式全视场显示解码后视频。",
+    "如果需要回退到旧的前方大屏效果，请改用 unity_editor_direct profile。"
+  ]
+}

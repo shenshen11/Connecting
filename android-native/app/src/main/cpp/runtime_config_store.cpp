@@ -39,6 +39,27 @@ bool TryParsePort(const std::string& text, std::uint16_t* out_port) {
     }
 }
 
+bool TryParseDisplayMode(const std::string& text, DecodedVideoDisplayMode* out_mode) {
+    if (out_mode == nullptr) {
+        return false;
+    }
+
+    const std::string normalized = Trim(text);
+    if (normalized == "quad_mono") {
+        *out_mode = DecodedVideoDisplayMode::QuadMono;
+        return true;
+    }
+    if (normalized == "projection_mono") {
+        *out_mode = DecodedVideoDisplayMode::ProjectionMono;
+        return true;
+    }
+    if (normalized == "projection_stereo") {
+        *out_mode = DecodedVideoDisplayMode::ProjectionStereo;
+        return true;
+    }
+    return false;
+}
+
 std::string MakePersistedConfigPath(android_app* app) {
     if (app == nullptr || app->activity == nullptr || app->activity->internalDataPath == nullptr) {
         return {};
@@ -89,6 +110,15 @@ bool LoadPersistedRuntimeConfig(android_app* app, RuntimeConfig* config, std::st
         if (key == "target_host") {
             if (!value.empty()) {
                 loaded.target_host = value;
+                used_any = true;
+            }
+            continue;
+        }
+
+        if (key == "display_mode") {
+            DecodedVideoDisplayMode display_mode = loaded.display_mode;
+            if (TryParseDisplayMode(value, &display_mode)) {
+                loaded.display_mode = display_mode;
                 used_any = true;
             }
             continue;
@@ -278,6 +308,15 @@ bool ApplyIntentRuntimeConfig(android_app* app, JNIEnv* env, RuntimeConfig* conf
         used_any = true;
     }
 
+    const std::string display_mode_text = GetStringExtra(env, intent, "display_mode");
+    if (!display_mode_text.empty()) {
+        DecodedVideoDisplayMode display_mode = config->display_mode;
+        if (TryParseDisplayMode(display_mode_text, &display_mode)) {
+            config->display_mode = display_mode;
+            used_any = true;
+        }
+    }
+
     std::uint16_t port_value = config->pose_target_port;
     if (GetIntExtra(env, intent, "target_port", &port_value)) {
         config->pose_target_port = port_value;
@@ -326,12 +365,13 @@ RuntimeConfigResolveResult ResolveRuntimeConfig(android_app* app, JNIEnv* env, R
 
     __android_log_print(ANDROID_LOG_INFO,
                         kLogTag,
-                        "Resolved runtime config target=%s pose_target_port=%u control_target_port=%u video_port=%u encoded_video_port=%u source=%s%s%s",
+                        "Resolved runtime config target=%s pose_target_port=%u control_target_port=%u video_port=%u encoded_video_port=%u display_mode=%s source=%s%s%s",
                         config->target_host.c_str(),
                         static_cast<unsigned>(config->pose_target_port),
                         static_cast<unsigned>(config->control_target_port),
                         static_cast<unsigned>(config->video_port),
                         static_cast<unsigned>(config->encoded_video_port),
+                        DecodedVideoDisplayModeName(config->display_mode),
                         "defaults",
                         result.used_persisted ? "+persisted" : "",
                         result.used_intent ? "+intent" : "");
@@ -365,6 +405,7 @@ bool SaveLastSuccessfulRuntimeConfig(android_app* app, const RuntimeConfig& conf
     output << "control_target_port=" << config.control_target_port << "\n";
     output << "video_port=" << config.video_port << "\n";
     output << "encoded_video_port=" << config.encoded_video_port << "\n";
+    output << "display_mode=" << DecodedVideoDisplayModeName(config.display_mode) << "\n";
     output.close();
 
     if (!output) {
@@ -386,10 +427,11 @@ bool SaveLastSuccessfulRuntimeConfig(android_app* app, const RuntimeConfig& conf
 
     __android_log_print(ANDROID_LOG_INFO,
                         kLogTag,
-                        "Saved last successful runtime config target=%s pose_target_port=%u control_target_port=%u path=%s",
+                        "Saved last successful runtime config target=%s pose_target_port=%u control_target_port=%u display_mode=%s path=%s",
                         config.target_host.c_str(),
                         static_cast<unsigned>(config.pose_target_port),
                         static_cast<unsigned>(config.control_target_port),
+                        DecodedVideoDisplayModeName(config.display_mode),
                         path.c_str());
     return true;
 }

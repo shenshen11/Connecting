@@ -23,6 +23,7 @@ Thumbs.db
 # Temporary local test logs
 /tmp_*.log
 /tmp_*.err
+/tmp_headset_screencap*.png
 
 # Third-party local sample build artifacts
 /third_party/nvidia-video-sdk-samples/video-sdk-samples-master/nvEncBroadcastSample/nvEncBroadcastSample/x64/Debug/

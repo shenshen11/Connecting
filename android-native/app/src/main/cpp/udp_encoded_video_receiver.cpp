@@ -3,6 +3,7 @@
 #include <android/log.h>
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <cstring>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -13,9 +14,38 @@ namespace {
 constexpr const char* kLogTag = "videotest-native";
 constexpr std::size_t kMaxPacketSize = 1500;
 constexpr std::size_t kMaxQueuedFrames = 8;
+constexpr std::size_t kMaxActiveFrameAssemblies = 32;
+constexpr std::uint32_t kMaxFrameReorderWindow = 256;
 
 bool IsNewerFrame(std::uint32_t incoming, std::uint32_t baseline) {
     return static_cast<std::int32_t>(incoming - baseline) > 0;
+}
+
+bool IsStreamRestartOrDiscontinuity(std::uint32_t incoming_frame_id,
+                                    std::uint64_t incoming_timestamp_us,
+                                    std::uint32_t baseline_frame_id,
+                                    std::uint64_t baseline_timestamp_us) {
+    if (baseline_timestamp_us == 0) {
+        return false;
+    }
+
+    if (incoming_frame_id >= baseline_frame_id) {
+        return false;
+    }
+
+    if (incoming_timestamp_us <= baseline_timestamp_us) {
+        return false;
+    }
+
+    return true;
+}
+
+bool IsRecentOutOfOrderFrame(std::uint32_t incoming_frame_id, std::uint32_t baseline_frame_id) {
+    if (incoming_frame_id >= baseline_frame_id) {
+        return false;
+    }
+
+    return baseline_frame_id - incoming_frame_id <= kMaxFrameReorderWindow;
 }
 
 }  // namespace
@@ -118,44 +148,105 @@ void UdpEncodedVideoReceiver::HandlePacket(const std::uint8_t* data, std::size_t
         return;
     }
 
-    if (!assembly_.active || assembly_.frame_id != chunk_header.frame_id) {
+    auto assembly_iter = std::find_if(
+        assemblies_.begin(),
+        assemblies_.end(),
+        [&](const FrameAssembly& assembly) {
+            return assembly.active && assembly.frame_id == chunk_header.frame_id;
+        });
+
+    if (assembly_iter == assemblies_.end()) {
         if (has_completed_frame_ && !IsNewerFrame(chunk_header.frame_id, last_completed_frame_id_)) {
-            return;
+            if (chunk_header.frame_id == last_completed_frame_id_) {
+                return;
+            }
+
+            const bool can_arrive_out_of_order =
+                chunk_header.stereo.view_count > 1 &&
+                chunk_header.stereo.layout ==
+                    static_cast<std::uint16_t>(vt::proto::VideoStereoLayout::ProjectionViews);
+            if (!can_arrive_out_of_order ||
+                !IsRecentOutOfOrderFrame(chunk_header.frame_id, last_completed_frame_id_)) {
+                if (!IsStreamRestartOrDiscontinuity(chunk_header.frame_id,
+                                                    packet_header.timestamp_us,
+                                                    last_completed_frame_id_,
+                                                    last_completed_timestamp_us_)) {
+                    return;
+                }
+
+                assemblies_.clear();
+                {
+                    std::lock_guard<std::mutex> lock(queue_mutex_);
+                    completed_frames_.clear();
+                }
+                ++stream_restart_count_;
+                __android_log_print(
+                    ANDROID_LOG_INFO,
+                    kLogTag,
+                    "Encoded video receiver detected sender restart/discontinuity #%u. lastFrame=%u lastTs=%llu incomingFrame=%u incomingTs=%llu. Resetting stale queued frames and accepting new stream.",
+                    stream_restart_count_,
+                    last_completed_frame_id_,
+                    static_cast<unsigned long long>(last_completed_timestamp_us_),
+                    chunk_header.frame_id,
+                    static_cast<unsigned long long>(packet_header.timestamp_us));
+                has_completed_frame_ = false;
+                last_completed_frame_id_ = 0;
+                last_completed_timestamp_us_ = 0;
+            }
         }
-        assembly_.active = true;
-        assembly_.frame_id = chunk_header.frame_id;
-        assembly_.width = chunk_header.width;
-        assembly_.height = chunk_header.height;
-        assembly_.codec = vt::proto::VideoCodec::H264AnnexB;
-        assembly_.flags = chunk_header.flags;
-        assembly_.timestamp_us = packet_header.timestamp_us;
-        assembly_.frame_size = chunk_header.frame_size;
-        assembly_.chunk_count = chunk_header.chunk_count;
-        assembly_.received_chunks = 0;
-        assembly_.bytes.assign(chunk_header.frame_size, 0);
-        assembly_.chunk_received.assign(chunk_header.chunk_count, 0);
+
+        while (assemblies_.size() >= kMaxActiveFrameAssemblies) {
+            assemblies_.pop_front();
+        }
+        assemblies_.push_back({});
+        assembly_iter = assemblies_.end();
+        --assembly_iter;
+
+        assembly_iter->active = true;
+        assembly_iter->frame_id = chunk_header.frame_id;
+        assembly_iter->width = chunk_header.width;
+        assembly_iter->height = chunk_header.height;
+        assembly_iter->codec = vt::proto::VideoCodec::H264AnnexB;
+        assembly_iter->flags = chunk_header.flags;
+        assembly_iter->stereo = chunk_header.stereo;
+        assembly_iter->timestamp_us = packet_header.timestamp_us;
+        assembly_iter->latest_packet_timestamp_us = packet_header.timestamp_us;
+        assembly_iter->frame_size = chunk_header.frame_size;
+        assembly_iter->chunk_count = chunk_header.chunk_count;
+        assembly_iter->received_chunks = 0;
+        assembly_iter->bytes.assign(chunk_header.frame_size, 0);
+        assembly_iter->chunk_received.assign(chunk_header.chunk_count, 0);
+    } else if (packet_header.timestamp_us > assembly_iter->latest_packet_timestamp_us) {
+        assembly_iter->latest_packet_timestamp_us = packet_header.timestamp_us;
     }
 
-    if (chunk_header.chunk_index >= assembly_.chunk_received.size() ||
-        assembly_.chunk_received[chunk_header.chunk_index] != 0) {
+    if (chunk_header.chunk_index >= assembly_iter->chunk_received.size() ||
+        assembly_iter->chunk_received[chunk_header.chunk_index] != 0) {
         return;
     }
 
-    std::memcpy(assembly_.bytes.data() + chunk_header.chunk_offset,
+    std::memcpy(assembly_iter->bytes.data() + chunk_header.chunk_offset,
                 data + header_bytes,
                 chunk_header.chunk_size);
-    assembly_.chunk_received[chunk_header.chunk_index] = 1;
-    assembly_.received_chunks += 1;
+    assembly_iter->chunk_received[chunk_header.chunk_index] = 1;
+    assembly_iter->received_chunks += 1;
 
-    if (assembly_.received_chunks == assembly_.chunk_count) {
+    if (assembly_iter->received_chunks == assembly_iter->chunk_count) {
+        const std::uint32_t completed_frame_id = assembly_iter->frame_id;
+        const std::uint64_t completed_timestamp_us = assembly_iter->latest_packet_timestamp_us;
+        const vt::proto::VideoStereoFrameMetadata completed_stereo = assembly_iter->stereo;
+        const std::uint32_t completed_frame_size = assembly_iter->frame_size;
+        const std::uint16_t completed_flags = assembly_iter->flags;
+
         EncodedVideoFrame frame{};
-        frame.frame_id = assembly_.frame_id;
-        frame.width = assembly_.width;
-        frame.height = assembly_.height;
-        frame.codec = assembly_.codec;
-        frame.flags = assembly_.flags;
-        frame.timestamp_us = assembly_.timestamp_us;
-        frame.bytes = std::move(assembly_.bytes);
+        frame.frame_id = assembly_iter->frame_id;
+        frame.width = assembly_iter->width;
+        frame.height = assembly_iter->height;
+        frame.codec = assembly_iter->codec;
+        frame.flags = assembly_iter->flags;
+        frame.stereo = assembly_iter->stereo;
+        frame.timestamp_us = assembly_iter->timestamp_us;
+        frame.bytes = std::move(assembly_iter->bytes);
 
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -165,15 +256,25 @@ void UdpEncodedVideoReceiver::HandlePacket(const std::uint8_t* data, std::size_t
             }
         }
 
-        last_completed_frame_id_ = assembly_.frame_id;
+        if (!has_completed_frame_ || IsNewerFrame(completed_frame_id, last_completed_frame_id_)) {
+            last_completed_frame_id_ = completed_frame_id;
+        }
+        if (completed_timestamp_us > last_completed_timestamp_us_) {
+            last_completed_timestamp_us_ = completed_timestamp_us;
+        }
         has_completed_frame_ = true;
         __android_log_print(ANDROID_LOG_INFO,
                             kLogTag,
-                            "Encoded video frame complete id=%u bytes=%u flags=0x%x",
-                            last_completed_frame_id_,
-                            assembly_.frame_size,
-                            assembly_.flags);
-        assembly_ = {};
+                            "Encoded video frame complete id=%u pair=%u view=%u/%u layout=%s bytes=%u flags=0x%x",
+                            completed_frame_id,
+                            completed_stereo.frame_pair_id,
+                            static_cast<unsigned>(completed_stereo.view_id),
+                            static_cast<unsigned>(completed_stereo.view_count),
+                            vt::proto::VideoStereoLayoutName(
+                                static_cast<vt::proto::VideoStereoLayout>(completed_stereo.layout)),
+                            completed_frame_size,
+                            completed_flags);
+        assemblies_.erase(assembly_iter);
     }
 }
 

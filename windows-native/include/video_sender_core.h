@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <string>
 
+#include "video_protocol.h"
+
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
@@ -66,6 +68,13 @@ public:
 
     virtual std::string FrameLogSuffix() const { return {}; }
     virtual std::uint16_t EncodedFrameFlags() const noexcept { return 0; }
+    virtual vt::proto::VideoStereoFrameMetadata EncodedCodecConfigStereoMetadata() const noexcept {
+        return vt::proto::MakeMonoVideoStereoFrameMetadata();
+    }
+    virtual vt::proto::VideoStereoFrameMetadata EncodedFrameStereoMetadata(
+        const FrameContext& frame_context) const noexcept {
+        return vt::proto::MakeMonoVideoStereoFrameMetadata(frame_context.frame_index);
+    }
     virtual void BeforeEncodeCopy() {}
     virtual void AfterEncodeCopy() {}
     virtual void Shutdown() noexcept {}
@@ -73,6 +82,7 @@ public:
 
 struct SenderRunOptions final {
     std::atomic<bool>* stop_requested = nullptr;
+    std::atomic<std::uint32_t>* shared_packet_frame_id = nullptr;
 };
 
 bool OpenNonBlockingUdpSocket(std::uint16_t port, const char* label, SOCKET* out_socket);
