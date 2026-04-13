@@ -16,6 +16,7 @@ struct VideoFrame final {
     std::uint16_t width = 0;
     std::uint16_t height = 0;
     vt::proto::VideoPixelFormat pixel_format = vt::proto::VideoPixelFormat::Unknown;
+    vt::proto::VideoStereoFrameMetadata stereo{};
     std::vector<std::uint8_t> pixels;
 };
 
@@ -36,6 +37,8 @@ private:
         std::uint16_t width = 0;
         std::uint16_t height = 0;
         vt::proto::VideoPixelFormat pixel_format = vt::proto::VideoPixelFormat::Unknown;
+        vt::proto::VideoStereoFrameMetadata stereo{};
+        std::uint64_t latest_packet_timestamp_us = 0;
         std::uint32_t frame_size = 0;
         std::uint16_t chunk_count = 0;
         std::uint16_t received_chunks = 0;
@@ -57,7 +60,9 @@ private:
 
     FrameAssembly assembly_{};
     std::uint32_t last_completed_frame_id_ = 0;
+    std::uint64_t last_completed_timestamp_us_ = 0;
     bool has_completed_frame_ = false;
+    std::uint32_t stream_restart_count_ = 0;
 };
 
 }  // namespace vt::android

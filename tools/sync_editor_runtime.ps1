@@ -4,6 +4,8 @@ param(
     [string]$AdbPath = 'D:\platform-tools-latest-windows\platform-tools\adb.exe',
     [string]$PackageName = 'com.videotest.nativeapp',
     [string]$ActivityName = 'android.app.NativeActivity',
+    [ValidateSet('quad_mono', 'projection_mono', 'projection_stereo')]
+    [string]$DisplayMode = 'quad_mono',
     [UInt16]$TargetPort = 0,
     [UInt16]$PoseTargetPort = 0,
     [UInt16]$ControlTargetPort = 0,
@@ -110,9 +112,25 @@ function Assert-AdbReady {
     }
 }
 
-function Reset-UnitySavedEndpoint {
+function Get-UnityCaptureMode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DisplayModeValue
+    )
+
+    switch ($DisplayModeValue) {
+        'projection_stereo' { return 'stereo_projection' }
+        default { return 'mono' }
+    }
+}
+
+function Write-UnitySavedEndpoint {
     param(
         [string]$Path,
+        [string]$TargetHost,
+        [UInt16]$VideoPort,
+        [UInt16]$PosePort,
+        [string]$DisplayModeValue,
         [switch]$SkipReset
     )
 
@@ -120,17 +138,28 @@ function Reset-UnitySavedEndpoint {
         return 'skipped'
     }
 
-    if (Test-Path -LiteralPath $Path) {
-        Remove-Item -LiteralPath $Path -Force
-        return 'deleted'
+    $directory = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($directory) -and -not (Test-Path -LiteralPath $directory)) {
+        $null = New-Item -ItemType Directory -Path $directory -Force
     }
 
-    return 'missing'
+    $captureViewMode = Get-UnityCaptureMode -DisplayModeValue $DisplayModeValue
+    $record = [ordered]@{
+        targetHost      = $TargetHost
+        videoPort       = [int]$VideoPort
+        posePort        = [int]$PosePort
+        captureViewMode = $captureViewMode
+    }
+
+    $json = $record | ConvertTo-Json
+    Set-Content -LiteralPath $Path -Value $json -Encoding UTF8
+    return "written mode=$captureViewMode"
 }
 
 function Write-HeadsetRuntimeConfig {
     param(
         [string]$TargetHost,
+        [string]$DisplayModeValue,
         [UInt16]$PosePort,
         [UInt16]$ControlPort,
         [UInt16]$RawVideoPort,
@@ -151,6 +180,7 @@ function Write-HeadsetRuntimeConfig {
         "control_target_port=$ControlPort"
         "video_port=$RawVideoPort"
         "encoded_video_port=$EncodedPort"
+        "display_mode=$DisplayModeValue"
     )
 
     $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) 'videotest_runtime_config.txt'
@@ -165,6 +195,7 @@ function Write-HeadsetRuntimeConfig {
 function Restart-HeadsetApp {
     param(
         [string]$TargetHost,
+        [string]$DisplayModeValue,
         [UInt16]$PosePort,
         [UInt16]$ControlPort,
         [UInt16]$RawVideoPort,
@@ -180,6 +211,7 @@ function Restart-HeadsetApp {
             '-n',
             "$PackageName/$ActivityName",
             '--es', 'target_host', $TargetHost,
+            '--es', 'display_mode', $DisplayModeValue,
             '--ei', 'target_port', "$PosePort",
             '--ei', 'pose_target_port', "$PosePort",
             '--ei', 'control_target_port', "$ControlPort",
@@ -213,15 +245,23 @@ $ResolvedControlTargetPort = if ($ControlTargetPort -ne 0) {
 $ResolvedPcIp = Resolve-PcIp -ExplicitIp $PcIp
 Assert-AdbReady
 
-$unityCacheState = Reset-UnitySavedEndpoint -Path $UnitySavedEndpointPath -SkipReset:$SkipUnityCacheReset
+$unityCacheState = Write-UnitySavedEndpoint `
+    -Path $UnitySavedEndpointPath `
+    -TargetHost 'auto' `
+    -VideoPort $EncodedVideoPort `
+    -PosePort $ResolvedPoseTargetPort `
+    -DisplayModeValue $DisplayMode `
+    -SkipReset:$SkipUnityCacheReset
 Write-HeadsetRuntimeConfig `
     -TargetHost $ResolvedPcIp `
+    -DisplayModeValue $DisplayMode `
     -PosePort $ResolvedPoseTargetPort `
     -ControlPort $ResolvedControlTargetPort `
     -RawVideoPort $VideoPort `
     -EncodedPort $EncodedVideoPort
 Restart-HeadsetApp `
     -TargetHost $ResolvedPcIp `
+    -DisplayModeValue $DisplayMode `
     -PosePort $ResolvedPoseTargetPort `
     -ControlPort $ResolvedControlTargetPort `
     -RawVideoPort $VideoPort `
@@ -229,9 +269,10 @@ Restart-HeadsetApp `
 
 Write-Output "PC IPv4: $ResolvedPcIp"
 Write-Output "adb: $script:ResolvedAdbPath"
-Write-Output "Unity saved endpoint: $unityCacheState ($UnitySavedEndpointPath)"
+Write-Output "Unity runtime config: $unityCacheState ($UnitySavedEndpointPath)"
 Write-Output "Pose target port: $ResolvedPoseTargetPort"
 Write-Output "Control target port: $ResolvedControlTargetPort"
+Write-Output "Display mode: $DisplayMode"
 Write-Output "Headset runtime config:"
 Invoke-Adb @('shell', "run-as $PackageName cat files/last_successful_runtime_config.txt")
 Write-Output 'Headset process:'

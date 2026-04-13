@@ -1,0 +1,21 @@
+{
+  "name": "unity_editor_projection_stereo",
+  "description": "Unity Editor 双眼发送联调，头显使用 projection_stereo，Unity sender 进入 StereoProjection 采集模式。",
+  "syncRuntime": {
+    "enabled": true,
+    "displayMode": "projection_stereo",
+    "poseTargetPort": 25672,
+    "controlTargetPort": 25672,
+    "videoPort": 25673,
+    "encodedVideoPort": 25674,
+    "skipUnityCacheReset": false
+  },
+  "desktopSender": {
+    "enabled": false
+  },
+  "nextSteps": [
+    "打开 Unity Editor，确认场景中的 UnitySenderController 保持启用。",
+    "运行本 profile 后，Unity 的运行时配置会切到 captureViewMode=StereoProjection。",
+    "点击 Play，头显侧 projection_stereo 会优先等待左右眼双路 decoded stream。"
+  ]
+}

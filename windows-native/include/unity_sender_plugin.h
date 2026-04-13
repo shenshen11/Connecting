@@ -32,6 +32,8 @@ struct UnitySenderStats final {
     std::uint64_t pose_packets_received = 0;
     std::uint64_t control_packets_received = 0;
     std::uint32_t last_pose_sequence = 0;
+    std::uint32_t configured_view_count = 1;
+    std::uint32_t latest_frame_pair_id = 0;
 };
 
 VT_UNITY_SENDER_EXPORT bool UnitySender_Configure(const char* target_host,
@@ -43,6 +45,7 @@ VT_UNITY_SENDER_EXPORT bool UnitySender_Configure(const char* target_host,
                                                   std::uint16_t height);
 
 VT_UNITY_SENDER_EXPORT void UnitySender_SetTexture(void* texture_handle);
+VT_UNITY_SENDER_EXPORT void UnitySender_SetTextureForView(int view_id, void* texture_handle);
 VT_UNITY_SENDER_EXPORT bool UnitySender_Start();
 VT_UNITY_SENDER_EXPORT void UnitySender_Stop();
 VT_UNITY_SENDER_EXPORT bool UnitySender_IsRunning();

@@ -248,6 +248,11 @@ function Invoke-RuntimeSync {
         EncodedVideoPort = [uint16](Get-ConfigValue -InputObject $SyncConfig -PropertyName 'encodedVideoPort' 25674)
     }
 
+    $displayMode = Get-ConfigValue -InputObject $SyncConfig -PropertyName 'displayMode' $null
+    if (-not [string]::IsNullOrWhiteSpace([string]$displayMode)) {
+        $syncParameters.DisplayMode = [string]$displayMode
+    }
+
     $poseTargetPort = Get-ConfigValue -InputObject $SyncConfig -PropertyName 'poseTargetPort' $null
     if ($null -ne $poseTargetPort) {
         $syncParameters.PoseTargetPort = [uint16]$poseTargetPort

@@ -6,12 +6,16 @@
 
 #include <android/log.h>
 #include <android/native_window_jni.h>
+#include <android/surface_texture_jni.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <sstream>
 #include <vector>
+
+#include <GLES2/gl2ext.h>
 
 namespace vt::android {
 namespace {
@@ -19,6 +23,7 @@ namespace {
 constexpr const char* kLogTag = "videotest-native";
 constexpr XrReferenceSpaceType kAppSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
 constexpr XrReferenceSpaceType kHeadSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+constexpr bool kProjectionMonoDiagnosticUseQuadSwapchain = false;
 
 std::string XrResultToString(XrInstance instance, XrResult result) {
     char buffer[XR_MAX_RESULT_STRING_SIZE]{};
@@ -36,6 +41,85 @@ std::string MakeError(const std::string& step, XrInstance instance, XrResult res
     std::ostringstream oss;
     oss << step << " failed: " << XrResultToString(instance, result);
     return oss.str();
+}
+
+std::string GlInfoLog(GLuint object, bool shader) {
+    GLint log_length = 0;
+    if (shader) {
+        glGetShaderiv(object, GL_INFO_LOG_LENGTH, &log_length);
+    } else {
+        glGetProgramiv(object, GL_INFO_LOG_LENGTH, &log_length);
+    }
+    if (log_length <= 1) {
+        return {};
+    }
+
+    std::vector<char> log(static_cast<std::size_t>(log_length), '\0');
+    GLsizei written = 0;
+    if (shader) {
+        glGetShaderInfoLog(object, log_length, &written, log.data());
+    } else {
+        glGetProgramInfoLog(object, log_length, &written, log.data());
+    }
+    return std::string(log.data(), static_cast<std::size_t>(std::max<GLsizei>(written, 0)));
+}
+
+GLuint CompileShader(GLenum type, const char* source, std::string* error) {
+    const GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+    if (compiled != GL_TRUE) {
+        if (error != nullptr) {
+            *error = "GL shader compile failed: " + GlInfoLog(shader, true);
+        }
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+GLuint LinkProgram(const char* vertex_source, const char* fragment_source, std::string* error) {
+    const GLuint vertex_shader = CompileShader(GL_VERTEX_SHADER, vertex_source, error);
+    if (vertex_shader == 0) {
+        return 0;
+    }
+    const GLuint fragment_shader = CompileShader(GL_FRAGMENT_SHADER, fragment_source, error);
+    if (fragment_shader == 0) {
+        glDeleteShader(vertex_shader);
+        return 0;
+    }
+
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertex_shader);
+    glAttachShader(program, fragment_shader);
+    glLinkProgram(program);
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE) {
+        if (error != nullptr) {
+            *error = "GL program link failed: " + GlInfoLog(program, false);
+        }
+        glDeleteProgram(program);
+        return 0;
+    }
+    return program;
+}
+
+bool ClearJniException(JNIEnv* env, const char* step, std::string* error) {
+    if (env == nullptr || !env->ExceptionCheck()) {
+        return false;
+    }
+    env->ExceptionClear();
+    if (error != nullptr) {
+        *error = std::string(step) + " raised a JNI exception.";
+    }
+    return true;
 }
 
 std::uint32_t ToTrackingFlags(XrSpaceLocationFlags flags) {
@@ -116,13 +200,20 @@ bool XrPoseRuntime::Initialize(android_app* app, const RuntimeConfig& config, st
     if (!CreateSession(error)) {
         return false;
     }
+    if (!InitializePrimaryStereoViews(error)) {
+        return false;
+    }
     if (!CreateReferenceSpaces(error)) {
         return false;
     }
     if (!CreateQuadSwapchain(error)) {
         return false;
     }
-    if (!CreateAndroidSurfaceSwapchain(error)) {
+    if (UsesDecodedVideoGlProjection()) {
+        if (!CreateDecodedVideoGlOutput(error)) {
+            return false;
+        }
+    } else if (!CreateAndroidSurfaceSwapchain(error)) {
         return false;
     }
 
@@ -134,11 +225,16 @@ bool XrPoseRuntime::Initialize(android_app* app, const RuntimeConfig& config, st
         static_cast<unsigned>(config_.pose_target_port),
         config_.target_host.c_str(),
         static_cast<unsigned>(config_.control_target_port));
+    __android_log_print(ANDROID_LOG_INFO,
+                        kLogTag,
+                        "Decoded video display mode: %s",
+                        DecodedVideoDisplayModeName(config_.display_mode));
 
     return true;
 }
 
 void XrPoseRuntime::Shutdown() {
+    DestroyDecodedVideoGlOutput();
     DestroyAndroidSurfaceSwapchain();
     DestroyQuadSwapchain();
 
@@ -403,6 +499,52 @@ bool XrPoseRuntime::CreateSession(std::string* error) {
     return true;
 }
 
+bool XrPoseRuntime::InitializePrimaryStereoViews(std::string* error) {
+    uint32_t view_count = 0;
+    XrResult result = xrEnumerateViewConfigurationViews(
+        instance_, system_id_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &view_count, nullptr);
+    if (XR_FAILED(result) || view_count == 0) {
+        if (error != nullptr) {
+            *error = MakeError("xrEnumerateViewConfigurationViews(count)", instance_, result);
+        }
+        return false;
+    }
+
+    primary_stereo_view_configs_.assign(view_count, {XR_TYPE_VIEW_CONFIGURATION_VIEW});
+    result = xrEnumerateViewConfigurationViews(instance_,
+                                               system_id_,
+                                               XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                               view_count,
+                                               &view_count,
+                                               primary_stereo_view_configs_.data());
+    if (XR_FAILED(result)) {
+        if (error != nullptr) {
+            *error = MakeError("xrEnumerateViewConfigurationViews(list)", instance_, result);
+        }
+        return false;
+    }
+
+    primary_stereo_views_.assign(view_count, {XR_TYPE_VIEW});
+    for (auto& view : primary_stereo_views_) {
+        view = {XR_TYPE_VIEW};
+    }
+
+    for (std::size_t index = 0; index < primary_stereo_view_configs_.size(); ++index) {
+        const auto& view = primary_stereo_view_configs_[index];
+        __android_log_print(ANDROID_LOG_INFO,
+                            kLogTag,
+                            "Primary stereo view[%zu]: recommended=%ux%u max=%ux%u samples=%u",
+                            index,
+                            view.recommendedImageRectWidth,
+                            view.recommendedImageRectHeight,
+                            view.maxImageRectWidth,
+                            view.maxImageRectHeight,
+                            view.recommendedSwapchainSampleCount);
+    }
+
+    return true;
+}
+
 bool XrPoseRuntime::CreateReferenceSpaces(std::string* error) {
     XrReferenceSpaceCreateInfo app_space_create_info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
     app_space_create_info.referenceSpaceType = kAppSpaceType;
@@ -628,45 +770,605 @@ void XrPoseRuntime::DestroyAndroidSurfaceSwapchain() {
     }
 }
 
+std::uint32_t XrPoseRuntime::TargetDecodedVideoGlViewCount() const noexcept {
+    return config_.display_mode == DecodedVideoDisplayMode::ProjectionStereo ? 2u : 1u;
+}
+
+bool XrPoseRuntime::HasDecodedVideoForGlView(std::uint32_t view_index) const noexcept {
+    return view_index < decoded_video_gl_view_count_ &&
+           view_index < decoded_video_gl_views_.size() &&
+           decoded_video_gl_views_[view_index].decoder.HasRenderedFrame();
+}
+
+std::uint16_t XrPoseRuntime::CurrentDecodedGlStreamFlags(std::uint32_t view_index) const noexcept {
+    if (view_index >= decoded_video_gl_view_count_ || view_index >= decoded_video_gl_views_.size()) {
+        return 0;
+    }
+
+    return decoded_video_gl_views_[view_index].decoder.CurrentStreamFlags();
+}
+
+bool XrPoseRuntime::CreateDecodedVideoGlOutput(std::string* error) {
+    uint32_t format_count = 0;
+    XrResult result = xrEnumerateSwapchainFormats(session_, 0, &format_count, nullptr);
+    if (XR_FAILED(result) || format_count == 0) {
+        if (error != nullptr) {
+            *error = MakeError("xrEnumerateSwapchainFormats(decoded-video count)", instance_, result);
+        }
+        return false;
+    }
+
+    std::vector<int64_t> formats(format_count);
+    result = xrEnumerateSwapchainFormats(session_, format_count, &format_count, formats.data());
+    if (XR_FAILED(result)) {
+        if (error != nullptr) {
+            *error = MakeError("xrEnumerateSwapchainFormats(decoded-video list)", instance_, result);
+        }
+        return false;
+    }
+
+    const std::array<int64_t, 2> preferred_formats = {
+        GL_SRGB8_ALPHA8,
+        GL_RGBA8,
+    };
+
+    decoded_video_gl_swapchain_format_ = formats.front();
+    for (const auto preferred : preferred_formats) {
+        for (const auto available : formats) {
+            if (available == preferred) {
+                decoded_video_gl_swapchain_format_ = available;
+                break;
+            }
+        }
+        if (decoded_video_gl_swapchain_format_ == preferred) {
+            break;
+        }
+    }
+
+    constexpr const char* kBlitVertexShader = R"(
+attribute vec2 aPosition;
+attribute vec2 aTexCoord;
+uniform mat4 uTexTransform;
+uniform float uVerticalFlip;
+varying vec2 vTexCoord;
+void main() {
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+    vec2 texCoord = aTexCoord;
+    if (uVerticalFlip > 0.5) {
+        texCoord.y = 1.0 - texCoord.y;
+    }
+    vec4 transformed = uTexTransform * vec4(texCoord, 0.0, 1.0);
+    vTexCoord = transformed.xy;
+}
+)";
+
+    constexpr const char* kBlitFragmentShader = R"(
+#extension GL_OES_EGL_image_external : require
+precision mediump float;
+uniform samplerExternalOES uTexture;
+varying vec2 vTexCoord;
+void main() {
+    gl_FragColor = texture2D(uTexture, vTexCoord);
+}
+)";
+
+    decoded_blit_program_ = LinkProgram(kBlitVertexShader, kBlitFragmentShader, error);
+    if (decoded_blit_program_ == 0) {
+        DestroyDecodedVideoGlOutput();
+        return false;
+    }
+    decoded_blit_position_attrib_ = glGetAttribLocation(decoded_blit_program_, "aPosition");
+    decoded_blit_texcoord_attrib_ = glGetAttribLocation(decoded_blit_program_, "aTexCoord");
+    decoded_blit_texture_uniform_ = glGetUniformLocation(decoded_blit_program_, "uTexture");
+    decoded_blit_transform_uniform_ = glGetUniformLocation(decoded_blit_program_, "uTexTransform");
+    decoded_blit_vertical_flip_uniform_ = glGetUniformLocation(decoded_blit_program_, "uVerticalFlip");
+    if (decoded_blit_position_attrib_ < 0 || decoded_blit_texcoord_attrib_ < 0 ||
+        decoded_blit_texture_uniform_ < 0 || decoded_blit_transform_uniform_ < 0 ||
+        decoded_blit_vertical_flip_uniform_ < 0) {
+        if (error != nullptr) {
+            *error = "Decoded-video GL blit shader is missing required attributes or uniforms.";
+        }
+        DestroyDecodedVideoGlOutput();
+        return false;
+    }
+
+    constexpr GLfloat kVertices[] = {
+        -1.0f, -1.0f, 0.0f, 0.0f,
+         1.0f, -1.0f, 1.0f, 0.0f,
+        -1.0f,  1.0f, 0.0f, 1.0f,
+         1.0f,  1.0f, 1.0f, 1.0f,
+    };
+    glGenBuffers(1, &decoded_blit_vbo_);
+    glBindBuffer(GL_ARRAY_BUFFER, decoded_blit_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(kVertices), kVertices, GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    decoded_video_gl_view_count_ = TargetDecodedVideoGlViewCount();
+    for (std::uint32_t view_index = 0; view_index < decoded_video_gl_view_count_; ++view_index) {
+        if (!CreateDecodedVideoGlOutputView(view_index, error)) {
+            DestroyDecodedVideoGlOutput();
+            return false;
+        }
+    }
+
+    __android_log_print(ANDROID_LOG_INFO,
+                        kLogTag,
+                        "Decoded-video GL output created. views=%u swapchainFormat=0x%llx size=%ux%u",
+                        decoded_video_gl_view_count_,
+                        static_cast<unsigned long long>(decoded_video_gl_swapchain_format_),
+                        encoded_width_,
+                        encoded_height_);
+    return true;
+}
+
+bool XrPoseRuntime::CreateDecodedVideoGlOutputView(std::uint32_t view_index, std::string* error) {
+    if (view_index >= decoded_video_gl_views_.size()) {
+        if (error != nullptr) {
+            *error = "Decoded-video GL view index is out of range.";
+        }
+        return false;
+    }
+
+    auto cleanup = [&]() {
+        DestroyDecodedVideoGlOutputView(view_index);
+        return false;
+    };
+
+    auto& view_output = decoded_video_gl_views_[view_index];
+
+    XrSwapchainCreateInfo create_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    create_info.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    create_info.format = decoded_video_gl_swapchain_format_;
+    create_info.sampleCount = 1;
+    create_info.width = encoded_width_;
+    create_info.height = encoded_height_;
+    create_info.faceCount = 1;
+    create_info.arraySize = 1;
+    create_info.mipCount = 1;
+
+    XrResult result = xrCreateSwapchain(session_, &create_info, &view_output.swapchain);
+    if (XR_FAILED(result)) {
+        if (error != nullptr) {
+            *error = MakeError("xrCreateSwapchain(decoded-video GL view)", instance_, result);
+        }
+        return cleanup();
+    }
+
+    uint32_t image_count = 0;
+    result = xrEnumerateSwapchainImages(view_output.swapchain, 0, &image_count, nullptr);
+    if (XR_FAILED(result) || image_count == 0) {
+        if (error != nullptr) {
+            *error = MakeError("xrEnumerateSwapchainImages(decoded-video view count)", instance_, result);
+        }
+        return cleanup();
+    }
+
+    view_output.images.resize(image_count, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
+    result = xrEnumerateSwapchainImages(view_output.swapchain,
+                                        image_count,
+                                        &image_count,
+                                        reinterpret_cast<XrSwapchainImageBaseHeader*>(view_output.images.data()));
+    if (XR_FAILED(result)) {
+        if (error != nullptr) {
+            *error = MakeError("xrEnumerateSwapchainImages(decoded-video view list)", instance_, result);
+        }
+        return cleanup();
+    }
+
+    view_output.framebuffers.resize(image_count, 0);
+    glGenFramebuffers(static_cast<GLsizei>(view_output.framebuffers.size()), view_output.framebuffers.data());
+    for (std::size_t i = 0; i < view_output.images.size(); ++i) {
+        glBindFramebuffer(GL_FRAMEBUFFER, view_output.framebuffers[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, view_output.images[i].image, 0);
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            if (error != nullptr) {
+                std::ostringstream oss;
+                oss << "Decoded-video GL framebuffer incomplete for view " << view_index << ". status=0x" << std::hex
+                    << status;
+                *error = oss.str();
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return cleanup();
+        }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    glGenTextures(1, &view_output.external_texture);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, view_output.external_texture);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+
+    JNIEnv* env = nullptr;
+    if (app_ == nullptr || app_->activity == nullptr || app_->activity->vm == nullptr ||
+        app_->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || env == nullptr) {
+        if (error != nullptr) {
+            *error = "Failed to attach JNI thread for SurfaceTexture creation.";
+        }
+        return cleanup();
+    }
+
+    jclass surface_texture_class = env->FindClass("android/graphics/SurfaceTexture");
+    if (ClearJniException(env, "FindClass(SurfaceTexture)", error) || surface_texture_class == nullptr) {
+        if (error != nullptr && error->empty()) {
+            *error = "Failed to find android.graphics.SurfaceTexture.";
+        }
+        return cleanup();
+    }
+
+    jmethodID constructor = env->GetMethodID(surface_texture_class, "<init>", "(I)V");
+    if (ClearJniException(env, "GetMethodID(SurfaceTexture.<init>)", error) || constructor == nullptr) {
+        if (error != nullptr && error->empty()) {
+            *error = "Failed to find SurfaceTexture(int) constructor.";
+        }
+        env->DeleteLocalRef(surface_texture_class);
+        return cleanup();
+    }
+
+    jobject surface_texture = env->NewObject(surface_texture_class, constructor, static_cast<jint>(view_output.external_texture));
+    if (ClearJniException(env, "NewObject(SurfaceTexture)", error) || surface_texture == nullptr) {
+        if (error != nullptr && error->empty()) {
+            *error = "Failed to create SurfaceTexture.";
+        }
+        env->DeleteLocalRef(surface_texture_class);
+        return cleanup();
+    }
+
+    jmethodID set_default_buffer_size = env->GetMethodID(surface_texture_class, "setDefaultBufferSize", "(II)V");
+    if (ClearJniException(env, "GetMethodID(setDefaultBufferSize)", nullptr)) {
+        set_default_buffer_size = nullptr;
+    }
+    if (set_default_buffer_size != nullptr) {
+        env->CallVoidMethod(surface_texture,
+                            set_default_buffer_size,
+                            static_cast<jint>(encoded_width_),
+                            static_cast<jint>(encoded_height_));
+        if (ClearJniException(env, "SurfaceTexture.setDefaultBufferSize", error)) {
+            env->DeleteLocalRef(surface_texture);
+            env->DeleteLocalRef(surface_texture_class);
+            return cleanup();
+        }
+    }
+
+    view_output.surface_texture_obj = env->NewGlobalRef(surface_texture);
+    env->DeleteLocalRef(surface_texture);
+    env->DeleteLocalRef(surface_texture_class);
+    if (ClearJniException(env, "NewGlobalRef(SurfaceTexture)", error) || view_output.surface_texture_obj == nullptr) {
+        if (error != nullptr && error->empty()) {
+            *error = "Failed to keep a global SurfaceTexture reference.";
+        }
+        return cleanup();
+    }
+
+    view_output.surface_texture = ASurfaceTexture_fromSurfaceTexture(env, view_output.surface_texture_obj);
+    if (view_output.surface_texture == nullptr) {
+        if (error != nullptr) {
+            *error = "ASurfaceTexture_fromSurfaceTexture returned null.";
+        }
+        return cleanup();
+    }
+
+    ANativeWindow* codec_window = ASurfaceTexture_acquireANativeWindow(view_output.surface_texture);
+    __android_log_print(ANDROID_LOG_INFO,
+                        kLogTag,
+                        "ASurfaceTexture_acquireANativeWindow view=%u returned %p",
+                        view_index,
+                        codec_window);
+    if (!view_output.decoder.Initialize(codec_window)) {
+        if (codec_window != nullptr) {
+            ANativeWindow_release(codec_window);
+        }
+        if (error != nullptr) {
+            *error = "Failed to initialize MediaCodec decoder with SurfaceTexture output window.";
+        }
+        return cleanup();
+    }
+    if (codec_window != nullptr) {
+        ANativeWindow_release(codec_window);
+    }
+
+    view_output.logged_waiting_for_first_frame = false;
+    view_output.logged_first_frame_ready = false;
+
+    __android_log_print(ANDROID_LOG_INFO,
+                        kLogTag,
+                        "Decoded-video GL view created. view=%u images=%u size=%ux%u texture=%u",
+                        view_index,
+                        image_count,
+                        encoded_width_,
+                        encoded_height_,
+                        view_output.external_texture);
+    return true;
+}
+
+void XrPoseRuntime::DestroyDecodedVideoGlOutput() {
+    for (std::uint32_t view_index = 0; view_index < decoded_video_gl_views_.size(); ++view_index) {
+        DestroyDecodedVideoGlOutputView(view_index);
+    }
+    decoded_video_gl_view_count_ = 0;
+
+    if (decoded_blit_vbo_ != 0) {
+        glDeleteBuffers(1, &decoded_blit_vbo_);
+        decoded_blit_vbo_ = 0;
+    }
+    if (decoded_blit_program_ != 0) {
+        glDeleteProgram(decoded_blit_program_);
+        decoded_blit_program_ = 0;
+    }
+    decoded_blit_position_attrib_ = -1;
+    decoded_blit_texcoord_attrib_ = -1;
+    decoded_blit_texture_uniform_ = -1;
+    decoded_blit_transform_uniform_ = -1;
+    decoded_blit_vertical_flip_uniform_ = -1;
+}
+
+void XrPoseRuntime::DestroyDecodedVideoGlOutputView(std::uint32_t view_index) {
+    if (view_index >= decoded_video_gl_views_.size()) {
+        return;
+    }
+
+    auto& view_output = decoded_video_gl_views_[view_index];
+    const bool had_output =
+        view_output.swapchain != XR_NULL_HANDLE || view_output.surface_texture != nullptr ||
+        view_output.surface_texture_obj != nullptr || view_output.external_texture != 0;
+    if (had_output) {
+        view_output.decoder.Shutdown();
+    }
+
+    if (view_output.surface_texture != nullptr) {
+        ASurfaceTexture_release(view_output.surface_texture);
+        view_output.surface_texture = nullptr;
+    }
+
+    if (view_output.surface_texture_obj != nullptr && app_ != nullptr &&
+        app_->activity != nullptr && app_->activity->vm != nullptr) {
+        JNIEnv* env = nullptr;
+        if (app_->activity->vm->AttachCurrentThread(&env, nullptr) == JNI_OK && env != nullptr) {
+            env->DeleteGlobalRef(view_output.surface_texture_obj);
+        }
+        view_output.surface_texture_obj = nullptr;
+    }
+
+    if (view_output.external_texture != 0) {
+        glDeleteTextures(1, &view_output.external_texture);
+        view_output.external_texture = 0;
+    }
+
+    if (!view_output.framebuffers.empty()) {
+        glDeleteFramebuffers(static_cast<GLsizei>(view_output.framebuffers.size()), view_output.framebuffers.data());
+        view_output.framebuffers.clear();
+    }
+    view_output.images.clear();
+
+    if (view_output.swapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(view_output.swapchain);
+        view_output.swapchain = XR_NULL_HANDLE;
+    }
+
+    view_output.logged_waiting_for_first_frame = false;
+    view_output.logged_first_frame_ready = false;
+}
+
+bool XrPoseRuntime::RenderDecodedVideoToGlSwapchain(std::uint32_t view_index, bool vertical_flip) {
+    if (view_index >= decoded_video_gl_view_count_ || view_index >= decoded_video_gl_views_.size()) {
+        return false;
+    }
+
+    auto& view_output = decoded_video_gl_views_[view_index];
+    if (view_output.surface_texture == nullptr || view_output.swapchain == XR_NULL_HANDLE ||
+        view_output.images.empty() || view_output.framebuffers.empty() ||
+        decoded_blit_program_ == 0 || decoded_blit_vbo_ == 0 || view_output.external_texture == 0) {
+        return false;
+    }
+
+    const int update_result = ASurfaceTexture_updateTexImage(view_output.surface_texture);
+    if (update_result != 0) {
+        __android_log_print(ANDROID_LOG_WARN,
+                            kLogTag,
+                            "ASurfaceTexture_updateTexImage failed for view=%u: %d",
+                            view_index,
+                            update_result);
+        return false;
+    }
+
+    float texture_transform[16]{};
+    ASurfaceTexture_getTransformMatrix(view_output.surface_texture, texture_transform);
+
+    uint32_t image_index = 0;
+    XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    XrResult result = xrAcquireSwapchainImage(view_output.swapchain, &acquire_info, &image_index);
+    if (XR_FAILED(result) || image_index >= view_output.framebuffers.size()) {
+        __android_log_print(ANDROID_LOG_WARN,
+                            kLogTag,
+                            "xrAcquireSwapchainImage(decoded-video GL view=%u) failed: %s index=%u",
+                            view_index,
+                            XrResultToString(instance_, result).c_str(),
+                            image_index);
+        return false;
+    }
+
+    XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wait_info.timeout = XR_INFINITE_DURATION;
+    result = xrWaitSwapchainImage(view_output.swapchain, &wait_info);
+    if (XR_FAILED(result)) {
+        __android_log_print(ANDROID_LOG_WARN,
+                            kLogTag,
+                            "xrWaitSwapchainImage(decoded-video GL view=%u) failed: %s",
+                            view_index,
+                            XrResultToString(instance_, result).c_str());
+        XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        xrReleaseSwapchainImage(view_output.swapchain, &release_info);
+        return false;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, view_output.framebuffers[image_index]);
+    glViewport(0, 0, static_cast<GLsizei>(encoded_width_), static_cast<GLsizei>(encoded_height_));
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glUseProgram(decoded_blit_program_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, view_output.external_texture);
+    glUniform1i(decoded_blit_texture_uniform_, 0);
+    glUniformMatrix4fv(decoded_blit_transform_uniform_, 1, GL_FALSE, texture_transform);
+    glUniform1f(decoded_blit_vertical_flip_uniform_, vertical_flip ? 1.0f : 0.0f);
+    glBindBuffer(GL_ARRAY_BUFFER, decoded_blit_vbo_);
+    glEnableVertexAttribArray(static_cast<GLuint>(decoded_blit_position_attrib_));
+    glEnableVertexAttribArray(static_cast<GLuint>(decoded_blit_texcoord_attrib_));
+    glVertexAttribPointer(static_cast<GLuint>(decoded_blit_position_attrib_),
+                          2,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          4 * static_cast<GLsizei>(sizeof(GLfloat)),
+                          reinterpret_cast<const void*>(0));
+    glVertexAttribPointer(static_cast<GLuint>(decoded_blit_texcoord_attrib_),
+                          2,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          4 * static_cast<GLsizei>(sizeof(GLfloat)),
+                          reinterpret_cast<const void*>(2 * sizeof(GLfloat)));
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableVertexAttribArray(static_cast<GLuint>(decoded_blit_texcoord_attrib_));
+    glDisableVertexAttribArray(static_cast<GLuint>(decoded_blit_position_attrib_));
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+    glUseProgram(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    xrReleaseSwapchainImage(view_output.swapchain, &release_info);
+    return true;
+}
+
 void XrPoseRuntime::PumpEncodedVideoDecoder() {
     EncodedVideoFrame frame{};
     while (encoded_video_receiver_.TryPopFrame(&frame)) {
-        h264_decoder_.OnFrame(frame);
-    }
-    h264_decoder_.DrainOutput();
-
-    std::uint32_t related_frame_id = 0;
-    const std::uint32_t pending_requests = h264_decoder_.ConsumePendingControlRequests(&related_frame_id);
-    if ((pending_requests & DecoderControlRequestCodecConfig) != 0) {
-        SendControlMessage(vt::proto::ControlMessageType::RequestCodecConfig,
-                           related_frame_id,
-                           vt::proto::ControlMessageFlagUrgent);
-    }
-    if ((pending_requests & DecoderControlRequestKeyframe) != 0) {
-        SendControlMessage(vt::proto::ControlMessageType::RequestKeyframe,
-                           related_frame_id,
-                           vt::proto::ControlMessageFlagUrgent);
-    }
-
-    if (h264_decoder_.IsConfigured() && !h264_decoder_.HasRenderedFrame() && !logged_waiting_for_decoded_frame_) {
-        __android_log_print(ANDROID_LOG_INFO,
-                            kLogTag,
-                            "H264 decoder configured and waiting for first rendered frame. queuedInputs=%llu",
-                            static_cast<unsigned long long>(h264_decoder_.QueuedFrameCount()));
-        logged_waiting_for_decoded_frame_ = true;
-    }
-
-    if (h264_decoder_.HasRenderedFrame() && !logged_surface_layer_active_) {
-        std::string save_error;
-        if (!SaveLastSuccessfulRuntimeConfig(app_, config_, &save_error)) {
-            __android_log_print(ANDROID_LOG_WARN,
-                                kLogTag,
-                                "Failed to save last successful runtime config: %s",
-                                save_error.c_str());
+        if (!UsesDecodedVideoGlProjection()) {
+            h264_decoder_.OnFrame(frame);
+            continue;
         }
+
+        std::uint32_t target_view_index = 0;
+        if (decoded_video_gl_view_count_ > 1 &&
+            frame.stereo.view_count > 1 &&
+            frame.stereo.view_id < decoded_video_gl_view_count_) {
+            target_view_index = frame.stereo.view_id;
+        }
+        decoded_video_gl_views_[target_view_index].decoder.OnFrame(frame);
+    }
+
+    if (!UsesDecodedVideoGlProjection()) {
+        h264_decoder_.DrainOutput();
+
+        std::uint32_t related_frame_id = 0;
+        const std::uint32_t pending_requests = h264_decoder_.ConsumePendingControlRequests(&related_frame_id);
+        if ((pending_requests & DecoderControlRequestCodecConfig) != 0) {
+            SendControlMessage(vt::proto::ControlMessageType::RequestCodecConfig,
+                               related_frame_id,
+                               vt::proto::ControlMessageFlagUrgent);
+        }
+        if ((pending_requests & DecoderControlRequestKeyframe) != 0) {
+            SendControlMessage(vt::proto::ControlMessageType::RequestKeyframe,
+                               related_frame_id,
+                               vt::proto::ControlMessageFlagUrgent);
+        }
+
+        if (h264_decoder_.IsConfigured() && !h264_decoder_.HasRenderedFrame() && !logged_waiting_for_decoded_frame_) {
+            __android_log_print(ANDROID_LOG_INFO,
+                                kLogTag,
+                                "H264 decoder configured and waiting for first rendered frame. queuedInputs=%llu",
+                                static_cast<unsigned long long>(h264_decoder_.QueuedFrameCount()));
+            logged_waiting_for_decoded_frame_ = true;
+        }
+
+        if (h264_decoder_.HasRenderedFrame() && !logged_surface_layer_active_) {
+            std::string save_error;
+            if (!SaveLastSuccessfulRuntimeConfig(app_, config_, &save_error)) {
+                __android_log_print(ANDROID_LOG_WARN,
+                                    kLogTag,
+                                    "Failed to save last successful runtime config: %s",
+                                    save_error.c_str());
+            }
+            __android_log_print(ANDROID_LOG_INFO,
+                                kLogTag,
+                                "First decoded frame is available. OpenXR quad layer will use Android surface swapchain.");
+            logged_surface_layer_active_ = true;
+        }
+        return;
+    }
+
+    std::uint32_t codec_config_related_frame_id = 0;
+    std::uint32_t keyframe_related_frame_id = 0;
+    bool request_codec_config = false;
+    bool request_keyframe = false;
+    bool has_any_rendered_frame = false;
+    bool saved_runtime_config = false;
+
+    for (std::uint32_t view_index = 0; view_index < decoded_video_gl_view_count_; ++view_index) {
+        auto& view_output = decoded_video_gl_views_[view_index];
+        view_output.decoder.DrainOutput();
+
+        std::uint32_t related_frame_id = 0;
+        const std::uint32_t pending_requests = view_output.decoder.ConsumePendingControlRequests(&related_frame_id);
+        if ((pending_requests & DecoderControlRequestCodecConfig) != 0) {
+            request_codec_config = true;
+            codec_config_related_frame_id = std::max(codec_config_related_frame_id, related_frame_id);
+        }
+        if ((pending_requests & DecoderControlRequestKeyframe) != 0) {
+            request_keyframe = true;
+            keyframe_related_frame_id = std::max(keyframe_related_frame_id, related_frame_id);
+        }
+
+        if (view_output.decoder.IsConfigured() &&
+            !view_output.decoder.HasRenderedFrame() &&
+            !view_output.logged_waiting_for_first_frame) {
+            __android_log_print(ANDROID_LOG_INFO,
+                                kLogTag,
+                                "Decoded-video GL decoder view=%u configured and waiting for first rendered frame. queuedInputs=%llu",
+                                view_index,
+                                static_cast<unsigned long long>(view_output.decoder.QueuedFrameCount()));
+            view_output.logged_waiting_for_first_frame = true;
+        }
+
+        if (view_output.decoder.HasRenderedFrame()) {
+            has_any_rendered_frame = true;
+            if (!view_output.logged_first_frame_ready) {
+                if (!saved_runtime_config) {
+                    std::string save_error;
+                    if (!SaveLastSuccessfulRuntimeConfig(app_, config_, &save_error)) {
+                        __android_log_print(ANDROID_LOG_WARN,
+                                            kLogTag,
+                                            "Failed to save last successful runtime config: %s",
+                                            save_error.c_str());
+                    }
+                    saved_runtime_config = true;
+                }
+                __android_log_print(ANDROID_LOG_INFO,
+                                    kLogTag,
+                                    "First decoded frame is available for GL projection view=%u.",
+                                    view_index);
+                view_output.logged_first_frame_ready = true;
+            }
+        }
+    }
+
+    if (request_codec_config) {
+        SendControlMessage(vt::proto::ControlMessageType::RequestCodecConfig,
+                           codec_config_related_frame_id,
+                           vt::proto::ControlMessageFlagUrgent);
+    }
+    if (request_keyframe) {
+        SendControlMessage(vt::proto::ControlMessageType::RequestKeyframe,
+                           keyframe_related_frame_id,
+                           vt::proto::ControlMessageFlagUrgent);
+    }
+
+    if (has_any_rendered_frame && !logged_surface_layer_active_) {
         __android_log_print(ANDROID_LOG_INFO,
                             kLogTag,
-                            "First decoded frame is available. OpenXR quad layer will use Android surface swapchain.");
+                            "First decoded frame is available. OpenXR projection path will use decoded-video GL swapchain(s).");
         logged_surface_layer_active_ = true;
     }
 }
@@ -775,27 +1477,118 @@ void XrPoseRuntime::RunFrame() {
 
     std::vector<XrCompositionLayerBaseHeader*> layers;
     XrCompositionLayerQuad quad_layer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    XrCompositionLayerQuad diagnostic_quad_layer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    XrCompositionLayerProjection projection_layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    std::vector<XrCompositionLayerProjectionView> projection_views;
     XrCompositionLayerImageLayoutFB image_layout{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
+    const bool using_decoded_gl_projection = UsesDecodedVideoGlProjection();
     const bool should_vertical_flip_encoded_video =
-        (h264_decoder_.CurrentStreamFlags() & vt::proto::VideoFrameFlagVerticalFlip) != 0;
-    if (composition_layer_image_layout_enabled_ && should_vertical_flip_encoded_video) {
+        ((using_decoded_gl_projection ? CurrentDecodedGlStreamFlags(0) : h264_decoder_.CurrentStreamFlags()) &
+         vt::proto::VideoFrameFlagVerticalFlip) != 0;
+    if (!using_decoded_gl_projection &&
+        composition_layer_image_layout_enabled_ &&
+        should_vertical_flip_encoded_video) {
         image_layout.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
         quad_layer.next = &image_layout;
     }
-    if (h264_decoder_.HasRenderedFrame() && android_surface_swapchain_ != XR_NULL_HANDLE) {
-        quad_layer.space = app_space_;
-        quad_layer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-        quad_layer.pose.orientation.w = 1.0f;
-        quad_layer.pose.position.x = 0.0f;
-        quad_layer.pose.position.y = 0.0f;
-        quad_layer.pose.position.z = -1.2f;
-        quad_layer.size.width = 1.6f;
-        quad_layer.size.height = 0.9f;
-        quad_layer.subImage.swapchain = android_surface_swapchain_;
-        quad_layer.subImage.imageRect.offset = {0, 0};
-        quad_layer.subImage.imageRect.extent = {static_cast<int32_t>(encoded_width_), static_cast<int32_t>(encoded_height_)};
-        quad_layer.subImage.imageArrayIndex = 0;
-        layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad_layer));
+    const bool has_primary_decoded_frame =
+        using_decoded_gl_projection ? HasDecodedVideoForGlView(0) : h264_decoder_.HasRenderedFrame();
+    const bool has_decoded_output =
+        using_decoded_gl_projection ? decoded_video_gl_view_count_ > 0 : android_surface_swapchain_ != XR_NULL_HANDLE;
+
+    if (has_primary_decoded_frame && has_decoded_output) {
+        DecodedVideoDisplayMode display_mode = config_.display_mode;
+
+        bool submitted_decoded_layer = false;
+        if (display_mode == DecodedVideoDisplayMode::ProjectionStereo &&
+            using_decoded_gl_projection &&
+            decoded_video_gl_view_count_ >= 2) {
+            const bool left_vertical_flip =
+                (CurrentDecodedGlStreamFlags(0) & vt::proto::VideoFrameFlagVerticalFlip) != 0;
+            const bool right_vertical_flip =
+                (CurrentDecodedGlStreamFlags(1) & vt::proto::VideoFrameFlagVerticalFlip) != 0;
+            const bool stereo_ready = HasDecodedVideoForGlView(0) && HasDecodedVideoForGlView(1);
+            if (stereo_ready &&
+                RenderDecodedVideoToGlSwapchain(0, left_vertical_flip) &&
+                RenderDecodedVideoToGlSwapchain(1, right_vertical_flip) &&
+                TryBuildDecodedGlStereoProjectionLayer(
+                    frame_state.predictedDisplayTime, &projection_layer, &projection_views)) {
+                layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&projection_layer));
+                submitted_decoded_layer = true;
+                if (!logged_projection_stereo_active_) {
+                    __android_log_print(ANDROID_LOG_INFO,
+                                        kLogTag,
+                                        "Decoded video is now submitted as projection_stereo with dedicated left/right projection swapchains.");
+                    logged_projection_stereo_active_ = true;
+                }
+            } else {
+                if (!stereo_ready && !logged_projection_stereo_waiting_) {
+                    __android_log_print(ANDROID_LOG_INFO,
+                                        kLogTag,
+                                        "projection_stereo is waiting for both decoded views; temporarily reusing the primary decoded view for both eyes.");
+                    logged_projection_stereo_waiting_ = true;
+                } else if (stereo_ready && !logged_projection_build_failure_) {
+                    __android_log_print(ANDROID_LOG_WARN,
+                                        kLogTag,
+                                        "Failed to build projection_stereo layer; temporarily falling back to primary-eye mono projection.");
+                    logged_projection_build_failure_ = true;
+                }
+
+                if (RenderDecodedVideoToGlSwapchain(0, left_vertical_flip) &&
+                    TryBuildDecodedGlProjectionLayer(
+                        frame_state.predictedDisplayTime, &projection_layer, &projection_views)) {
+                    layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&projection_layer));
+                    submitted_decoded_layer = true;
+                }
+            }
+        } else if (display_mode == DecodedVideoDisplayMode::ProjectionMono &&
+            ((kProjectionMonoDiagnosticUseQuadSwapchain &&
+              RenderQuadLayer(frame_state.predictedDisplayTime, &diagnostic_quad_layer) &&
+              TryBuildProjectionLayerFromSwapchain(
+                  frame_state.predictedDisplayTime, quad_swapchain_, quad_width_, quad_height_, &projection_layer, &projection_views)) ||
+             (using_decoded_gl_projection &&
+              RenderDecodedVideoToGlSwapchain(0, should_vertical_flip_encoded_video) &&
+              TryBuildDecodedGlProjectionLayer(
+                  frame_state.predictedDisplayTime, &projection_layer, &projection_views)) ||
+             (!kProjectionMonoDiagnosticUseQuadSwapchain &&
+              android_surface_swapchain_ != XR_NULL_HANDLE &&
+              TryBuildDecodedProjectionLayer(
+                  frame_state.predictedDisplayTime, &projection_layer, &projection_views)))) {
+            layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&projection_layer));
+            submitted_decoded_layer = true;
+            if (!logged_projection_layer_active_) {
+                __android_log_print(ANDROID_LOG_INFO,
+                                    kLogTag,
+                                    "Decoded video is now submitted as projection_mono for a more immersive full-FOV presentation.");
+                logged_projection_layer_active_ = true;
+            }
+        } else if (display_mode == DecodedVideoDisplayMode::ProjectionMono && !logged_projection_build_failure_) {
+            __android_log_print(ANDROID_LOG_WARN,
+                                kLogTag,
+                                "Failed to build projection_mono layer; falling back to quad layer.");
+            logged_projection_build_failure_ = true;
+        }
+
+        if (!submitted_decoded_layer) {
+            if (android_surface_swapchain_ != XR_NULL_HANDLE) {
+                quad_layer.space = app_space_;
+                quad_layer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quad_layer.pose.orientation.w = 1.0f;
+                quad_layer.pose.position.x = 0.0f;
+                quad_layer.pose.position.y = 0.0f;
+                quad_layer.pose.position.z = -1.2f;
+                quad_layer.size.width = 1.6f;
+                quad_layer.size.height = 0.9f;
+                quad_layer.subImage.swapchain = android_surface_swapchain_;
+                quad_layer.subImage.imageRect.offset = {0, 0};
+                quad_layer.subImage.imageRect.extent = {static_cast<int32_t>(encoded_width_),
+                                                        static_cast<int32_t>(encoded_height_)};
+                quad_layer.subImage.imageArrayIndex = 0;
+                layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad_layer));
+            } else if (RenderQuadLayer(frame_state.predictedDisplayTime, &quad_layer)) {
+                layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad_layer));
+            }
+        }
     } else if (RenderQuadLayer(frame_state.predictedDisplayTime, &quad_layer)) {
         layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad_layer));
     }
@@ -813,6 +1606,146 @@ void XrPoseRuntime::RunFrame() {
         __android_log_print(
             ANDROID_LOG_WARN, kLogTag, "xrEndFrame failed: %s", XrResultToString(instance_, end_result).c_str());
     }
+}
+
+bool XrPoseRuntime::TryBuildDecodedProjectionLayer(
+    XrTime predicted_display_time,
+    XrCompositionLayerProjection* layer,
+    std::vector<XrCompositionLayerProjectionView>* projection_views) {
+    return TryBuildProjectionLayerFromSwapchain(
+        predicted_display_time, android_surface_swapchain_, encoded_width_, encoded_height_, layer, projection_views);
+}
+
+bool XrPoseRuntime::TryBuildDecodedGlProjectionLayer(
+    XrTime predicted_display_time,
+    XrCompositionLayerProjection* layer,
+    std::vector<XrCompositionLayerProjectionView>* projection_views) {
+    if (decoded_video_gl_view_count_ == 0 || decoded_video_gl_views_[0].swapchain == XR_NULL_HANDLE) {
+        return false;
+    }
+
+    return TryBuildProjectionLayerFromSwapchain(predicted_display_time,
+                                                decoded_video_gl_views_[0].swapchain,
+                                                encoded_width_,
+                                                encoded_height_,
+                                                layer,
+                                                projection_views);
+}
+
+bool XrPoseRuntime::TryBuildDecodedGlStereoProjectionLayer(
+    XrTime predicted_display_time,
+    XrCompositionLayerProjection* layer,
+    std::vector<XrCompositionLayerProjectionView>* projection_views) {
+    if (decoded_video_gl_view_count_ < 2 ||
+        decoded_video_gl_views_[0].swapchain == XR_NULL_HANDLE ||
+        decoded_video_gl_views_[1].swapchain == XR_NULL_HANDLE) {
+        return false;
+    }
+
+    const XrSwapchain swapchains[2] = {
+        decoded_video_gl_views_[0].swapchain,
+        decoded_video_gl_views_[1].swapchain,
+    };
+    return TryBuildProjectionLayerFromSwapchains(predicted_display_time,
+                                                 swapchains,
+                                                 2,
+                                                 encoded_width_,
+                                                 encoded_height_,
+                                                 layer,
+                                                 projection_views);
+}
+
+bool XrPoseRuntime::TryBuildProjectionLayerFromSwapchain(
+    XrTime predicted_display_time,
+    XrSwapchain swapchain,
+    std::uint32_t image_width,
+    std::uint32_t image_height,
+    XrCompositionLayerProjection* layer,
+    std::vector<XrCompositionLayerProjectionView>* projection_views) {
+    const XrSwapchain swapchains[] = {swapchain};
+    return TryBuildProjectionLayerFromSwapchains(predicted_display_time,
+                                                 swapchains,
+                                                 1,
+                                                 image_width,
+                                                 image_height,
+                                                 layer,
+                                                 projection_views);
+}
+
+bool XrPoseRuntime::TryBuildProjectionLayerFromSwapchains(
+    XrTime predicted_display_time,
+    const XrSwapchain* swapchains,
+    std::uint32_t swapchain_count,
+    std::uint32_t image_width,
+    std::uint32_t image_height,
+    XrCompositionLayerProjection* layer,
+    std::vector<XrCompositionLayerProjectionView>* projection_views) {
+    if (layer == nullptr || projection_views == nullptr || swapchains == nullptr || swapchain_count == 0 ||
+        primary_stereo_views_.empty() || app_space_ == XR_NULL_HANDLE) {
+        return false;
+    }
+
+    XrViewLocateInfo locate_info{XR_TYPE_VIEW_LOCATE_INFO};
+    locate_info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate_info.displayTime = predicted_display_time;
+    locate_info.space = app_space_;
+
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    uint32_t output_view_count = 0;
+    for (auto& view : primary_stereo_views_) {
+        view = {XR_TYPE_VIEW};
+    }
+
+    const XrResult locate_result = xrLocateViews(session_,
+                                                 &locate_info,
+                                                 &view_state,
+                                                 static_cast<uint32_t>(primary_stereo_views_.size()),
+                                                 &output_view_count,
+                                                 primary_stereo_views_.data());
+    if (XR_FAILED(locate_result) || output_view_count == 0 || output_view_count > primary_stereo_views_.size()) {
+        return false;
+    }
+
+    const XrViewStateFlags required_flags =
+        XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
+    if ((view_state.viewStateFlags & required_flags) != required_flags) {
+        return false;
+    }
+
+    if (swapchain_count != 1 && swapchain_count < output_view_count) {
+        return false;
+    }
+
+    projection_views->clear();
+    projection_views->resize(output_view_count);
+
+    for (uint32_t index = 0; index < output_view_count; ++index) {
+        const XrSwapchain target_swapchain = swapchains[swapchain_count == 1 ? 0 : index];
+        if (target_swapchain == XR_NULL_HANDLE) {
+            return false;
+        }
+
+        auto& projection_view = (*projection_views)[index];
+        projection_view = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        projection_view.pose = primary_stereo_views_[index].pose;
+        projection_view.fov = primary_stereo_views_[index].fov;
+        projection_view.subImage.swapchain = target_swapchain;
+        projection_view.subImage.imageRect.offset = {0, 0};
+        projection_view.subImage.imageRect.extent = {static_cast<int32_t>(image_width),
+                                                     static_cast<int32_t>(image_height)};
+        projection_view.subImage.imageArrayIndex = 0;
+    }
+
+    layer->space = app_space_;
+    layer->viewCount = output_view_count;
+    layer->views = projection_views->data();
+    return true;
+}
+
+bool XrPoseRuntime::UsesDecodedVideoGlProjection() const noexcept {
+    return !kProjectionMonoDiagnosticUseQuadSwapchain &&
+           (config_.display_mode == DecodedVideoDisplayMode::ProjectionMono ||
+            config_.display_mode == DecodedVideoDisplayMode::ProjectionStereo);
 }
 
 bool XrPoseRuntime::RenderQuadLayer(XrTime predicted_display_time, XrCompositionLayerQuad* layer) {

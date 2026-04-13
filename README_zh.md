@@ -72,9 +72,37 @@
 - 头显端可用 MediaCodec 解码 H.264 并显示
 - 姿态驱动的原生场景闭环已打通
 - Windows 发送端已抽象为“共享发送核心 + 可插拔内容源”
+- 已新增可切换显示模式：`quad_mono`、`projection_mono`、`projection_stereo`
+- `projection_mono` 已验证可见，`projection_stereo` 已接通 true stereo projection 的最小代码骨架
 - Android 端已支持：
   - 启动参数覆盖目标地址
   - 记住上次成功连接地址
+
+---
+
+## 当前沉浸式显示路线
+
+当前项目不再只停留在“固定 quad 贴图”阶段，而是明确往 **OpenXR true stereo projection** 推进：
+
+- `quad_mono`
+  - 旧方案：单路视频作为 `XrCompositionLayerQuad` 提交，效果是“前方一块大屏”。
+- `projection_mono`
+  - 过渡方案：仍是单路解码，但改为走 `XrCompositionLayerProjection`，先验证 projection 显示链路与 compositor 行为。
+- `projection_stereo`
+  - 当前主线：Unity 左右眼分别输出 `RenderTexture`，Windows 原生插件分别编码发送，Android 按 `view_id` 路由到左右 decoder，再把左右眼 swapchain 提交给 OpenXR compositor。
+
+当前推荐的联调脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\videotest\tools\start_unity_editor_projection_mono.ps1
+powershell -ExecutionPolicy Bypass -File D:\videotest\tools\start_unity_editor_projection_stereo.ps1
+```
+
+如果只是更换网络环境后重新同步目标地址与头显运行时配置，可执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\videotest\tools\sync_editor_runtime.ps1
+```
 
 ---
 
@@ -83,3 +111,6 @@
 如果你希望直接阅读中文版本，请从这里开始：
 
 - [documentation_zh_index.md](D:/videotest/documentation_zh_index.md)
+- [immersive_video_display_plan_zh.md](D:/videotest/immersive_video_display_plan_zh.md)
+- [immersive_projection_pathfinding_log_zh.md](D:/videotest/immersive_projection_pathfinding_log_zh.md)
+- [startup_profiles_guide_zh.md](D:/videotest/startup_profiles_guide_zh.md)

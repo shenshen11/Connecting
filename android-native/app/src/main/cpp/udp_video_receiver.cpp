@@ -17,6 +17,25 @@ bool IsNewerFrame(std::uint32_t incoming, std::uint32_t baseline) {
     return static_cast<std::int32_t>(incoming - baseline) > 0;
 }
 
+bool IsStreamRestartOrDiscontinuity(std::uint32_t incoming_frame_id,
+                                    std::uint64_t incoming_timestamp_us,
+                                    std::uint32_t baseline_frame_id,
+                                    std::uint64_t baseline_timestamp_us) {
+    if (baseline_timestamp_us == 0) {
+        return false;
+    }
+
+    if (incoming_frame_id >= baseline_frame_id) {
+        return false;
+    }
+
+    if (incoming_timestamp_us <= baseline_timestamp_us) {
+        return false;
+    }
+
+    return true;
+}
+
 }  // namespace
 
 UdpVideoReceiver::~UdpVideoReceiver() {
@@ -115,7 +134,32 @@ void UdpVideoReceiver::HandlePacket(const std::uint8_t* data, std::size_t bytes)
 
     if (!assembly_.active || assembly_.frame_id != chunk_header.frame_id) {
         if (has_completed_frame_ && !IsNewerFrame(chunk_header.frame_id, last_completed_frame_id_)) {
-            return;
+            if (!IsStreamRestartOrDiscontinuity(chunk_header.frame_id,
+                                                packet_header.timestamp_us,
+                                                last_completed_frame_id_,
+                                                last_completed_timestamp_us_)) {
+                return;
+            }
+
+            assembly_ = {};
+            {
+                std::lock_guard<std::mutex> lock(latest_mutex_);
+                has_latest_frame_ = false;
+                latest_frame_ = {};
+            }
+            ++stream_restart_count_;
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                kLogTag,
+                "Video receiver detected sender restart/discontinuity #%u. lastFrame=%u lastTs=%llu incomingFrame=%u incomingTs=%llu. Resetting stale cached frame and accepting new stream.",
+                stream_restart_count_,
+                last_completed_frame_id_,
+                static_cast<unsigned long long>(last_completed_timestamp_us_),
+                chunk_header.frame_id,
+                static_cast<unsigned long long>(packet_header.timestamp_us));
+            has_completed_frame_ = false;
+            last_completed_frame_id_ = 0;
+            last_completed_timestamp_us_ = 0;
         }
 
         assembly_.active = true;
@@ -123,11 +167,15 @@ void UdpVideoReceiver::HandlePacket(const std::uint8_t* data, std::size_t bytes)
         assembly_.width = chunk_header.width;
         assembly_.height = chunk_header.height;
         assembly_.pixel_format = vt::proto::VideoPixelFormat::Rgba8888;
+        assembly_.stereo = chunk_header.stereo;
+        assembly_.latest_packet_timestamp_us = packet_header.timestamp_us;
         assembly_.frame_size = chunk_header.frame_size;
         assembly_.chunk_count = chunk_header.chunk_count;
         assembly_.received_chunks = 0;
         assembly_.pixels.assign(chunk_header.frame_size, 0);
         assembly_.chunk_received.assign(chunk_header.chunk_count, 0);
+    } else if (packet_header.timestamp_us > assembly_.latest_packet_timestamp_us) {
+        assembly_.latest_packet_timestamp_us = packet_header.timestamp_us;
     }
 
     if (chunk_header.chunk_index >= assembly_.chunk_received.size()) {
@@ -149,6 +197,7 @@ void UdpVideoReceiver::HandlePacket(const std::uint8_t* data, std::size_t bytes)
         completed.width = assembly_.width;
         completed.height = assembly_.height;
         completed.pixel_format = assembly_.pixel_format;
+        completed.stereo = assembly_.stereo;
         completed.pixels = std::move(assembly_.pixels);
 
         {
@@ -158,11 +207,17 @@ void UdpVideoReceiver::HandlePacket(const std::uint8_t* data, std::size_t bytes)
         }
 
         last_completed_frame_id_ = assembly_.frame_id;
+        last_completed_timestamp_us_ = assembly_.latest_packet_timestamp_us;
         has_completed_frame_ = true;
         __android_log_print(ANDROID_LOG_INFO,
                             kLogTag,
-                            "Video frame complete id=%u size=%ux%u bytes=%u",
+                            "Video frame complete id=%u pair=%u view=%u/%u layout=%s size=%ux%u bytes=%u",
                             last_completed_frame_id_,
+                            assembly_.stereo.frame_pair_id,
+                            static_cast<unsigned>(assembly_.stereo.view_id),
+                            static_cast<unsigned>(assembly_.stereo.view_count),
+                            vt::proto::VideoStereoLayoutName(
+                                static_cast<vt::proto::VideoStereoLayout>(assembly_.stereo.layout)),
                             assembly_.width,
                             assembly_.height,
                             assembly_.frame_size);

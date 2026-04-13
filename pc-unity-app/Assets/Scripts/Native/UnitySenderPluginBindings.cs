@@ -40,6 +40,8 @@ namespace VideoTest.UnityIntegration
             public ulong posePacketsReceived;
             public ulong controlPacketsReceived;
             public uint lastPoseSequence;
+            public uint configuredViewCount;
+            public uint latestFramePairId;
         }
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
@@ -55,6 +57,9 @@ namespace VideoTest.UnityIntegration
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern void UnitySender_SetTexture(IntPtr textureHandle);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void UnitySender_SetTextureForView(int viewId, IntPtr textureHandle);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         [return: MarshalAs(UnmanagedType.I1)]

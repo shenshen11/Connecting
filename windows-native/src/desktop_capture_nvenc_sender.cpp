@@ -97,6 +97,7 @@ void SendEncodedFrame(SOCKET sock,
         encoded_header.height = height;
         encoded_header.codec = static_cast<std::uint16_t>(vt::proto::VideoCodec::H264AnnexB);
         encoded_header.flags = flags;
+        encoded_header.stereo = vt::proto::MakeMonoVideoStereoFrameMetadata(frame_id);
         encoded_header.frame_size = frame_size;
         encoded_header.chunk_offset = chunk_offset;
         encoded_header.chunk_size = chunk_size;
